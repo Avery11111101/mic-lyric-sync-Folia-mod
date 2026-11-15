@@ -1,4 +1,33 @@
 // client.mjs — 整合式麥克風即時聽歌同步歌詞 (透過 folium.rpc 驅動內建主行程引擎)
+const DEFAULT_POLL_INTERVAL_SEC = 30;
+const MIN_POLL_INTERVAL_SEC = 5;
+const MAX_POLL_INTERVAL_SEC = 300;
+
+export function clampPollInterval(value) {
+  if (value === null || value === undefined || value === '' || typeof value === 'boolean') {
+    return DEFAULT_POLL_INTERVAL_SEC;
+  }
+  const n = Number(value);
+  if (!Number.isFinite(n)) return DEFAULT_POLL_INTERVAL_SEC;
+  return Math.max(MIN_POLL_INTERVAL_SEC, Math.min(MAX_POLL_INTERVAL_SEC, Math.round(n)));
+}
+
+export function getSongKey(song) {
+  if (!song) return '';
+  return `${song.source || ''}::${song.id ?? ''}`;
+}
+
+export function shouldResumeAfterSongEnd(playbackState, trackedSongKey) {
+  if (!trackedSongKey) return false;
+  if (!playbackState || !playbackState.song) return true;
+  if (getSongKey(playbackState.song) !== trackedSongKey) return true;
+  if (playbackState.state === 'ended' || playbackState.state === 'stopped') return true;
+  const duration = Number(playbackState.duration || 0);
+  const position = Number(playbackState.position || 0);
+  if (duration > 0 && position >= duration - 0.5) return true;
+  return false;
+}
+
 export default function activate(folium) {
   if (folium.env.context !== 'main') return;
   if (folium.host.folium.minor < 7) {
@@ -7,6 +36,9 @@ export default function activate(folium) {
   }
 
   let syncEnabled = false;
+  let recognitionPaused = false;
+  let trackedSongKey = '';
+  let songEndWatchTimer = null;
   let lastTrackSig = '';
   let songStartRefMs = 0; // 用於平滑多輪 Shazam 偏移的中位數基準時間
   let anchorSamples = []; // 儲存同一首歌最近 5 輪推算出的 t0 (trackStartWallClockMs)
@@ -25,6 +57,21 @@ export default function activate(folium) {
         type: 'text',
         label: { 'zh-CN': '麥克風裝置 ID', en: 'Microphone Device ID' },
         defaultValue: ''
+      },
+      {
+        key: 'pollIntervalSec',
+        type: 'number',
+        label: { 'zh-CN': '辨識間隔（秒，建議 30 秒）', en: 'Recognition Interval (s, 30s recommended)' },
+        min: MIN_POLL_INTERVAL_SEC,
+        max: MAX_POLL_INTERVAL_SEC,
+        step: 1,
+        defaultValue: DEFAULT_POLL_INTERVAL_SEC
+      },
+      {
+        key: 'pauseUntilSongEnd',
+        type: 'boolean',
+        label: { 'zh-CN': '播放完畢前不重複辨識（等播完再繼續）', en: 'Pause Recognition Until Song Ends' },
+        defaultValue: true
       },
       {
         key: 'driftThresholdSec',
@@ -67,6 +114,44 @@ export default function activate(folium) {
       return mountSettingsPanel(container, panelCtx, folium);
     }
   });
+
+  function stopSongEndWatcher() {
+    if (songEndWatchTimer !== null) {
+      clearInterval(songEndWatchTimer);
+      songEndWatchTimer = null;
+    }
+  }
+
+  async function resumeRecognitionFromPause(reason = '歌曲已播放完畢，繼續麥克風辨識') {
+    stopSongEndWatcher();
+    trackedSongKey = '';
+    if (!recognitionPaused) return;
+    recognitionPaused = false;
+    lastTrackSig = '';
+    songStartRefMs = 0;
+    anchorSamples = [];
+    if (!syncEnabled) return;
+    folium.log.info(`[MicSync] ${reason}`);
+    try {
+      await folium.rpc.call('setRecognitionPaused', false);
+    } catch {}
+  }
+
+  function startSongEndWatcher(song) {
+    stopSongEndWatcher();
+    trackedSongKey = getSongKey(song);
+    if (!trackedSongKey) return;
+    songEndWatchTimer = setInterval(() => {
+      if (!syncEnabled || !recognitionPaused) {
+        stopSongEndWatcher();
+        return;
+      }
+      const st = folium.playback.getState();
+      if (shouldResumeAfterSongEnd(st, trackedSongKey)) {
+        void resumeRecognitionFromPause();
+      }
+    }, 1000);
+  }
 
   function notifyButtons() {
     for (const fn of buttonUpdaters) fn();
@@ -167,6 +252,14 @@ export default function activate(folium) {
       folium.ui.navigate('player');
     }
 
+    if (cfg.pauseUntilSongEnd !== false) {
+      recognitionPaused = true;
+      startSongEndWatcher(song);
+      try {
+        await folium.rpc.call('setRecognitionPaused', true);
+      } catch {}
+    }
+
     folium.ui.toast(`已同步：${title}${artist ? ' - ' + artist : ''} (${formatTime(finalPos)})`, {
       type: 'success',
       durationMs: 3000
@@ -177,24 +270,42 @@ export default function activate(folium) {
     void handleRecognizedState(payload);
   });
 
+  const offSettingsWatch = settingsSection.settings.onChange((nextCfg) => {
+    const intervalSec = clampPollInterval(nextCfg?.pollIntervalSec);
+    void folium.rpc.call('setPollInterval', intervalSec).catch(() => {});
+    if (syncEnabled && recognitionPaused && nextCfg?.pauseUntilSongEnd === false) {
+      void resumeRecognitionFromPause('已關閉「播畢前不重複辨識」，恢復定期辨識');
+    }
+  });
+
   async function toggleSync() {
     syncEnabled = !syncEnabled;
     notifyButtons();
 
     if (syncEnabled) {
+      stopSongEndWatcher();
+      recognitionPaused = false;
+      trackedSongKey = '';
       lastTrackSig = '';
       songStartRefMs = 0;
       anchorSamples = [];
       const cfg = settingsSection.settings.get();
+      const pollIntervalSec = clampPollInterval(cfg.pollIntervalSec);
       folium.ui.toast('正在啟動麥克風辨識（首次會自動安裝套件）...', { type: 'info', durationMs: 3000 });
       try {
-        await folium.rpc.call('startSync', { deviceId: cfg.micDeviceId || '' });
+        await folium.rpc.call('startSync', {
+          deviceId: cfg.micDeviceId || '',
+          pollIntervalSec
+        });
       } catch (err) {
         syncEnabled = false;
         notifyButtons();
         folium.ui.toast(`啟動失敗：${err?.message || err}`, { type: 'error', durationMs: 4500 });
       }
     } else {
+      stopSongEndWatcher();
+      recognitionPaused = false;
+      trackedSongKey = '';
       await folium.rpc.call('stopSync');
       folium.ui.toast('已停止麥克風聽歌同步', { type: 'info', durationMs: 1800 });
     }
@@ -273,7 +384,11 @@ export default function activate(folium) {
 
   return () => {
     syncEnabled = false;
+    recognitionPaused = false;
+    trackedSongKey = '';
+    stopSongEndWatcher();
     if (typeof offState === 'function') offState();
+    if (typeof offSettingsWatch === 'function') offSettingsWatch();
     void folium.rpc.call('stopSync').catch(() => {});
     buttonUpdaters.clear();
   };
@@ -375,6 +490,24 @@ function mountSettingsPanel(container, panelCtx, folium) {
   micBox.append(micTitle, micRow, testRow);
   root.appendChild(micBox);
 
+  const pollIntervalInput = addNumberField(
+    root,
+    '辨識間隔（5–300 秒，建議 30 秒以避免 429 限流）',
+    MIN_POLL_INTERVAL_SEC,
+    MAX_POLL_INTERVAL_SEC,
+    1,
+    inputStyle,
+    (v) => {
+      const clamped = clampPollInterval(v);
+      pollIntervalInput.value = String(clamped);
+      panelCtx.settings.set({ pollIntervalSec: clamped });
+    }
+  );
+  const pauseUntilEndChk = addBoolField(
+    root,
+    '播放完畢前不重複辨識（等目前歌曲播完再繼續，關閉可定期校準時間軸）',
+    (v) => panelCtx.settings.set({ pauseUntilSongEnd: v })
+  );
   const driftInput = addNumberField(root, '自動校正時間軸門檻（0.5–15 秒）', 0.5, 15, 0.1, inputStyle, (v) => panelCtx.settings.set({ driftThresholdSec: v }));
   const offsetInput = addNumberField(root, '手動時間軸微調（-5 到 +5 秒）', -5, 5, 0.1, inputStyle, (v) => panelCtx.settings.set({ offsetAdjustSec: v }));
   const providerInput = addTextField(root, '指定音源 ID（留空用目前音源）', inputStyle, (v) => panelCtx.settings.set({ preferredProvider: v }));
@@ -491,6 +624,8 @@ function mountSettingsPanel(container, panelCtx, folium) {
   function syncFromSettings() {
     const v = panelCtx.settings.get();
     micSelect.value = v.micDeviceId || '';
+    pollIntervalInput.value = String(clampPollInterval(v.pollIntervalSec));
+    pauseUntilEndChk.checked = v.pauseUntilSongEnd !== false;
     driftInput.value = String(v.driftThresholdSec ?? 5);
     offsetInput.value = String(v.offsetAdjustSec ?? 0);
     providerInput.value = v.preferredProvider || '';

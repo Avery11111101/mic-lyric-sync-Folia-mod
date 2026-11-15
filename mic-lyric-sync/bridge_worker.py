@@ -18,11 +18,27 @@ import sounddevice as sd
 from shazamio import HTTPClient, Serialize, Shazam
 
 SAMPLE_RATE = 44100
-WINDOW_SEC = 12.0        # ShazamIO 0.9+ 建議的 12 秒最佳辨識視窗
-POLL_INTERVAL_SEC = 8.0  # 避免觸發 Shazam 429 限流的預設間隔
+WINDOW_SEC = 12.0               # ShazamIO 0.9+ 建議的 12 秒最佳辨識視窗
+DEFAULT_POLL_INTERVAL_SEC = 30.0  # 預設每 30 秒辨識一次，大幅降低 429 限流風險
+MIN_POLL_INTERVAL_SEC = 5.0
+MAX_POLL_INTERVAL_SEC = 300.0
+POLL_INTERVAL_SEC = DEFAULT_POLL_INTERVAL_SEC
 RECOGNIZE_TIMEOUT = 15.0
 MIN_RMS = 0.0008
 MAX_SKEW = 0.02
+
+
+def clamp_poll_interval(value: object) -> float:
+    """將辨識間隔秒數限制在安全範圍內，無效值則回傳預設 30 秒。"""
+    if isinstance(value, bool):
+        return DEFAULT_POLL_INTERVAL_SEC
+    try:
+        sec = float(value)
+    except (TypeError, ValueError):
+        return DEFAULT_POLL_INTERVAL_SEC
+    if not math.isfinite(sec):
+        return DEFAULT_POLL_INTERVAL_SEC
+    return max(MIN_POLL_INTERVAL_SEC, min(MAX_POLL_INTERVAL_SEC, sec))
 
 
 def emit(obj: dict) -> None:
@@ -68,8 +84,42 @@ class WorkerEngine:
         self.latest_peak = 0.0
         self.latest_rms = 0.0
         self.sync_active = False
+        self.recognition_paused = False
+        self.poll_interval_sec = DEFAULT_POLL_INTERVAL_SEC
         self.test_active = False
         self.should_quit = False
+        self._wake_event: asyncio.Event | None = None
+
+    def ensure_wake_event(self) -> asyncio.Event:
+        if self._wake_event is None:
+            self._wake_event = asyncio.Event()
+        return self._wake_event
+
+    def wake(self) -> None:
+        if self._wake_event is not None:
+            self._wake_event.set()
+
+    def clear_audio_buffer(self) -> None:
+        with self._lock:
+            self._chunks.clear()
+            self._total_samples = 0
+
+    def set_poll_interval(self, value: object) -> float:
+        self.poll_interval_sec = clamp_poll_interval(value)
+        emit_log("INFO", f"辨識間隔已設定為 {self.poll_interval_sec:.0f} 秒（下一輪生效）")
+        return self.poll_interval_sec
+
+    def set_recognition_paused(self, paused: bool) -> None:
+        target = bool(paused)
+        if self.recognition_paused == target:
+            return
+        self.recognition_paused = target
+        self.clear_audio_buffer()
+        if target:
+            emit_log("INFO", "歌曲播放中，已暫停重複辨識（將於播畢後自動繼續）")
+        else:
+            emit_log("INFO", "恢復麥克風辨識，開始收集下一首音訊...")
+        self.wake()
 
     def _audio_callback(self, indata: np.ndarray, frames: int, _time_info, status) -> None:
         mono = indata[:, 0].copy() if indata.ndim > 1 else indata.copy()
@@ -79,7 +129,7 @@ class WorkerEngine:
         self.latest_peak = float(np.max(np.abs(mono)))
         self.latest_rms = float(np.sqrt(np.mean(mono * mono)))
 
-        if self.sync_active:
+        if self.sync_active and not self.recognition_paused:
             with self._lock:
                 self._chunks.append(mono)
                 self._total_samples += n
@@ -168,6 +218,20 @@ async def level_loop(engine: WorkerEngine) -> None:
         await asyncio.sleep(0.15)
 
 
+async def interruptible_sleep(engine: WorkerEngine, seconds: float) -> None:
+    """可被控制指令即時中斷的等待，避免調整設定或停止時卡在長間隔 sleep。"""
+    if seconds <= 0 or engine.should_quit:
+        return
+    wake_event = engine.ensure_wake_event()
+    wake_event.clear()
+    try:
+        await asyncio.wait_for(wake_event.wait(), timeout=seconds)
+    except asyncio.TimeoutError:
+        pass
+    finally:
+        wake_event.clear()
+
+
 async def recognition_loop(engine: WorkerEngine) -> None:
     round_id = 0
     # 不在底層靜默重試 429，讓 RateLimited 立刻浮出以便記錄並冷卻
@@ -181,20 +245,20 @@ async def recognition_loop(engine: WorkerEngine) -> None:
     )
     async with Shazam(http_client=client) as shazam:
         while not engine.should_quit:
-            if not engine.sync_active:
-                await asyncio.sleep(0.3)
+            if not engine.sync_active or engine.recognition_paused:
+                await interruptible_sleep(engine, 0.3)
                 continue
 
             snap = engine.snapshot_wav()
             if snap is None:
-                await asyncio.sleep(1.0)
+                await interruptible_sleep(engine, 1.0)
                 continue
 
             round_id += 1
             wav_bytes, duration, rms, peak_db, snapshot_mono = snap
             if not wav_bytes:
                 emit_log("INFO", f"#{round_id} 環境安靜 (RMS={rms:.5f}, Peak={peak_db:.1f}dBFS)，等待音樂中...")
-                await asyncio.sleep(POLL_INTERVAL_SEC)
+                await interruptible_sleep(engine, engine.poll_interval_sec)
                 continue
 
             emit_log("INFO", f"#{round_id} 開始辨識 | 時長={duration:.1f}s, RMS={rms:.4f}, Peak={peak_db:.1f}dBFS")
@@ -204,16 +268,17 @@ async def recognition_loop(engine: WorkerEngine) -> None:
                 serialized = Serialize.full_track(raw_out)
             except asyncio.TimeoutError:
                 emit_log("WARN", f"#{round_id} ShazamIO 網路請求逾時（>{RECOGNIZE_TIMEOUT}s，請檢查網路或代理設定）")
-                await asyncio.sleep(POLL_INTERVAL_SEC)
+                await interruptible_sleep(engine, engine.poll_interval_sec)
                 continue
             except Exception as exc:
                 err_name = type(exc).__name__
                 if "RateLimited" in err_name or "429" in str(exc):
-                    emit_log("WARN", f"#{round_id} 觸發 Shazam 429 限流，自動冷卻 20 秒後再試...")
-                    await asyncio.sleep(20.0)
+                    cooldown = max(20.0, engine.poll_interval_sec)
+                    emit_log("WARN", f"#{round_id} 觸發 Shazam 429 限流，自動冷卻 {cooldown:.0f} 秒後再試...")
+                    await interruptible_sleep(engine, cooldown)
                 else:
                     emit_log("ERROR", f"#{round_id} 辨識錯誤 ({err_name})：{exc}")
-                    await asyncio.sleep(POLL_INTERVAL_SEC)
+                    await interruptible_sleep(engine, engine.poll_interval_sec)
                 continue
 
             elapsed_ms = (time.perf_counter() - t0) * 1000
@@ -222,7 +287,7 @@ async def recognition_loop(engine: WorkerEngine) -> None:
 
             if not track or not matches:
                 emit_log("INFO", f"#{round_id} 未比對到歌曲 | 耗時={elapsed_ms:.0f}ms, retry_ms={serialized.retry_ms}")
-                await asyncio.sleep(POLL_INTERVAL_SEC)
+                await interruptible_sleep(engine, engine.poll_interval_sec)
                 continue
 
             best = matches[0]
@@ -230,7 +295,7 @@ async def recognition_loop(engine: WorkerEngine) -> None:
             f_skew = float(best.frequency_skew or 0.0)
             if abs(t_skew) > MAX_SKEW or abs(f_skew) > MAX_SKEW:
                 emit_log("WARN", f"#{round_id} 忽略高偏差匹配 (time_skew={t_skew:.4f}, freq_skew={f_skew:.4f})")
-                await asyncio.sleep(POLL_INTERVAL_SEC)
+                await interruptible_sleep(engine, engine.poll_interval_sec)
                 continue
 
             offset_sec = float(best.offset or 0.0)
@@ -254,7 +319,7 @@ async def recognition_loop(engine: WorkerEngine) -> None:
                     "elapsed_ms": round(elapsed_ms),
                 }
             )
-            await asyncio.sleep(POLL_INTERVAL_SEC)
+            await interruptible_sleep(engine, engine.poll_interval_sec)
 
 
 def stdin_reader(loop: asyncio.AbstractEventLoop, engine: WorkerEngine) -> None:
@@ -280,23 +345,42 @@ def stdin_reader(loop: asyncio.AbstractEventLoop, engine: WorkerEngine) -> None:
                 else:
                     engine.stop_stream_if_idle()
             elif cmd == "start_sync":
+                if "poll_interval_sec" in m:
+                    engine.poll_interval_sec = clamp_poll_interval(m.get("poll_interval_sec"))
                 engine.sync_active = True
+                engine.recognition_paused = False
+                engine.clear_audio_buffer()
                 engine.ensure_stream()
-                emit_log("INFO", "開始收集麥克風滑動視窗音訊...")
+                engine.wake()
+                emit_log("INFO", f"開始收集麥克風滑動視窗音訊（辨識間隔 {engine.poll_interval_sec:.0f} 秒）...")
             elif cmd == "stop_sync":
                 engine.sync_active = False
+                engine.recognition_paused = False
+                engine.clear_audio_buffer()
                 engine.stop_stream_if_idle()
+                engine.wake()
+            elif cmd == "set_poll_interval":
+                engine.set_poll_interval(m.get("seconds"))
+            elif cmd == "pause_recognition":
+                if engine.sync_active:
+                    engine.set_recognition_paused(True)
+            elif cmd == "resume_recognition":
+                if engine.sync_active:
+                    engine.set_recognition_paused(False)
             elif cmd == "quit":
                 engine.should_quit = True
                 engine.sync_active = False
+                engine.recognition_paused = False
                 engine.test_active = False
                 engine.stop_stream_if_idle()
+                engine.wake()
 
         loop.call_soon_threadsafe(handle)
 
 
 async def main() -> None:
     engine = WorkerEngine()
+    engine.ensure_wake_event()
     loop = asyncio.get_running_loop()
     emit({"type": "mics", "current_device_id": engine.device_id, "devices": list_input_devices()})
     threading.Thread(target=stdin_reader, args=(loop, engine), daemon=True).start()

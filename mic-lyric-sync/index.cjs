@@ -4,12 +4,25 @@ const fs = require('fs');
 const path = require('path');
 
 const UPDATE_INTERVAL_MS = 7 * 24 * 60 * 60 * 1000; // 每 7 天自動檢查更新一次
+const DEFAULT_POLL_INTERVAL_SEC = 30;
+const MIN_POLL_INTERVAL_SEC = 5;
+const MAX_POLL_INTERVAL_SEC = 300;
+
+function normalizePollInterval(value) {
+  if (value === null || value === undefined || value === '' || typeof value === 'boolean') {
+    return DEFAULT_POLL_INTERVAL_SEC;
+  }
+  const n = Number(value);
+  if (!Number.isFinite(n)) return DEFAULT_POLL_INTERVAL_SEC;
+  return Math.max(MIN_POLL_INTERVAL_SEC, Math.min(MAX_POLL_INTERVAL_SEC, Math.round(n)));
+}
 
 module.exports = function activate(api) {
   let proc = null;
   let stdoutBuf = '';
   let disposed = false;
   let bootstrapPromise = null;
+  let desiredPollIntervalSec = DEFAULT_POLL_INTERVAL_SEC;
 
   const logHistory = [];
   let cachedMics = { current_device_id: null, devices: [] };
@@ -238,12 +251,30 @@ module.exports = function activate(api) {
     if (opts && opts.deviceId !== undefined && opts.deviceId !== '') {
       sendCmd({ cmd: 'select_mic', device_id: Number(opts.deviceId) });
     }
-    sendCmd({ cmd: 'start_sync' });
+    if (opts && opts.pollIntervalSec !== undefined) {
+      desiredPollIntervalSec = normalizePollInterval(opts.pollIntervalSec);
+    }
+    sendCmd({ cmd: 'start_sync', poll_interval_sec: desiredPollIntervalSec });
     return { ok: true };
   });
 
   api.rpc.handle('stopSync', () => {
     sendCmd({ cmd: 'stop_sync' });
+    return { ok: true };
+  });
+
+  api.rpc.handle('setPollInterval', (seconds) => {
+    desiredPollIntervalSec = normalizePollInterval(seconds);
+    if (proc) {
+      sendCmd({ cmd: 'set_poll_interval', seconds: desiredPollIntervalSec });
+    }
+    return { ok: true, pollIntervalSec: desiredPollIntervalSec };
+  });
+
+  api.rpc.handle('setRecognitionPaused', (paused) => {
+    if (proc) {
+      sendCmd({ cmd: paused ? 'pause_recognition' : 'resume_recognition' });
+    }
     return { ok: true };
   });
 
