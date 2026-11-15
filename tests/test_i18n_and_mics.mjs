@@ -10,7 +10,7 @@ import {
   resolveLocale,
   t
 } from '../mic-lyric-sync/i18n.mjs';
-import activate from '../mic-lyric-sync/client.mjs';
+import activate, { detectPanelDarkMode, isLightColor } from '../mic-lyric-sync/client.mjs';
 
 test('四種語系翻譯鍵值完整對齊且無空白翻譯', () => {
   assert.deepEqual(SUPPORTED_LOCALES, ['zh-TW', 'zh-CN', 'ja', 'en']);
@@ -116,4 +116,21 @@ test('activate 註冊四語系設定與指令標籤並包含 language 設定', (
     }
   }
   cleanup();
+});
+
+test('isLightColor 與 detectPanelDarkMode 正確判斷深色與淺色模式', () => {
+  assert.equal(isLightColor('rgb(244, 244, 245)'), true);
+  assert.equal(isLightColor('rgba(255, 255, 255, 0.9)'), true);
+  assert.equal(isLightColor('rgb(24, 24, 27)'), false);
+  assert.equal(isLightColor('invalid'), null);
+
+  const prevGetComputedStyle = globalThis.getComputedStyle;
+  try {
+    globalThis.getComputedStyle = () => ({ color: 'rgb(240, 240, 240)' });
+    assert.equal(detectPanelDarkMode({}), true);
+    globalThis.getComputedStyle = () => ({ color: 'rgb(30, 30, 30)' });
+    assert.equal(detectPanelDarkMode({}), false);
+  } finally {
+    globalThis.getComputedStyle = prevGetComputedStyle;
+  }
 });

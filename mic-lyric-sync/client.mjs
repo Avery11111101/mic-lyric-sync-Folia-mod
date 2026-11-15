@@ -36,6 +36,40 @@ export function shouldResumeAfterSongEnd(playbackState, trackedSongKey) {
   return false;
 }
 
+export function isLightColor(cssColor) {
+  if (!cssColor || typeof cssColor !== 'string') return null;
+  const match = cssColor.match(/rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/i);
+  if (!match) return null;
+  const r = Number(match[1]);
+  const g = Number(match[2]);
+  const b = Number(match[3]);
+  const luminance = 0.299 * r + 0.587 * g + 0.114 * b;
+  return luminance >= 140;
+}
+
+export function detectPanelDarkMode(el) {
+  try {
+    if (el && typeof globalThis.getComputedStyle === 'function') {
+      const lightText = isLightColor(globalThis.getComputedStyle(el).color);
+      if (lightText !== null) return lightText;
+    }
+  } catch {}
+  try {
+    const docEl = globalThis.document?.documentElement;
+    if (docEl) {
+      const theme = String(docEl.dataset?.theme || docEl.getAttribute?.('data-theme') || '').toLowerCase();
+      if (theme.includes('dark') || docEl.classList?.contains('dark')) return true;
+      if (theme.includes('light') || docEl.classList?.contains('light')) return false;
+    }
+  } catch {}
+  try {
+    if (typeof globalThis.matchMedia === 'function') {
+      return Boolean(globalThis.matchMedia('(prefers-color-scheme: dark)').matches);
+    }
+  } catch {}
+  return false;
+}
+
 export default function activate(folium) {
   if (folium.env.context !== 'main') return;
   if (folium.host.folium.minor < 7) {
@@ -423,6 +457,7 @@ export default function activate(folium) {
 
 function mountSettingsPanel(container, panelCtx, folium) {
   const root = document.createElement('div');
+  root.dataset.micLyricSyncPanel = '1';
   root.style.cssText = [
     'display:flex',
     'flex-direction:column',
@@ -431,6 +466,22 @@ function mountSettingsPanel(container, panelCtx, folium) {
     'color:var(--folium-primary, inherit)',
     'font-size:13px'
   ].join(';');
+
+  const themeStyleEl = document.createElement('style');
+  root.appendChild(themeStyleEl);
+
+  function applySelectTheme() {
+    const dark = detectPanelDarkMode(root);
+    themeStyleEl.textContent = dark
+      ? [
+          '[data-mic-lyric-sync-panel] select { color-scheme: dark; background-color: #24262b !important; color: #f4f4f5 !important; border-color: rgba(255, 255, 255, 0.22) !important; }',
+          '[data-mic-lyric-sync-panel] select option { background-color: #1e2025; color: #f4f4f5; }'
+        ].join('\n')
+      : [
+          '[data-mic-lyric-sync-panel] select { color-scheme: light; background-color: #ffffff !important; color: #18181b !important; border-color: rgba(0, 0, 0, 0.2) !important; }',
+          '[data-mic-lyric-sync-panel] select option { background-color: #ffffff; color: #18181b; }'
+        ].join('\n');
+  }
 
   const inputStyle = [
     'width:100%',
@@ -767,6 +818,25 @@ function mountSettingsPanel(container, panelCtx, folium) {
 
   const offChange = panelCtx.settings.onChange(syncFromSettings);
   syncFromSettings();
+  applySelectTheme();
+
+  let themeObserver = null;
+  if (typeof MutationObserver === 'function' && globalThis.document?.documentElement) {
+    themeObserver = new MutationObserver(() => applySelectTheme());
+    themeObserver.observe(globalThis.document.documentElement, {
+      attributes: true,
+      attributeFilter: ['class', 'style', 'data-theme']
+    });
+  }
+  const colorSchemeQuery =
+    typeof globalThis.matchMedia === 'function'
+      ? globalThis.matchMedia('(prefers-color-scheme: dark)')
+      : null;
+  const onColorSchemeChange = () => applySelectTheme();
+  if (colorSchemeQuery?.addEventListener) {
+    colorSchemeQuery.addEventListener('change', onColorSchemeChange);
+  }
+
   void scanMics(false);
   void folium.rpc.call('getLogs').then((lines) => {
     if (Array.isArray(lines)) {
@@ -781,6 +851,10 @@ function mountSettingsPanel(container, panelCtx, folium) {
     if (typeof offLevel === 'function') offLevel();
     if (typeof offLog === 'function') offLog();
     if (typeof offChange === 'function') offChange();
+    if (themeObserver) themeObserver.disconnect();
+    if (colorSchemeQuery?.removeEventListener) {
+      colorSchemeQuery.removeEventListener('change', onColorSchemeChange);
+    }
     root.remove();
   };
 }
