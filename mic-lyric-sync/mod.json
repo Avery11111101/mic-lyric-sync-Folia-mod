@@ -1,0 +1,15 @@
+{
+  "folium": 1,
+  "id": "mic-lyric-sync",
+  "name": "麥克風即時聽歌同步歌詞",
+  "version": "2.1.0",
+  "author": "Avery",
+  "description": "內建自動建立隔離虛擬環境並自動安裝與更新 Python 辨識套件 (shazamio、sounddevice、numpy)，透過麥克風即時辨識並同步顯示 Folia 原生全螢幕歌詞。",
+  "main": "index.cjs",
+  "client": "client.mjs",
+  "permissions": [
+    "playback.control",
+    "filesystem.data"
+  ],
+  "folia": ">=0.7.20"
+}
