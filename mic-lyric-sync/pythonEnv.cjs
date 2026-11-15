@@ -106,6 +106,19 @@ function writeJsonSafe(filePath, data) {
   fs.writeFileSync(filePath, JSON.stringify(data, null, 2), 'utf8');
 }
 
+function removeDirSafe(dirPath) {
+  if (!fs.existsSync(dirPath)) return;
+  try {
+    fs.rmSync(dirPath, { recursive: true, force: true, maxRetries: 8, retryDelay: 150 });
+  } catch {
+    const backup = `${dirPath}.old.${Date.now()}`;
+    fs.renameSync(dirPath, backup);
+    try {
+      fs.rmSync(backup, { recursive: true, force: true, maxRetries: 2, retryDelay: 100 });
+    } catch {}
+  }
+}
+
 function createPythonEnvManager({ dataDir, reqFile, pushLog, runCommand, platform = process.platform, arch = process.arch }) {
   const configFile = path.join(dataDir, 'python_config.json');
   const metaFile = path.join(dataDir, 'python_env_meta.json');
@@ -234,7 +247,7 @@ function createPythonEnvManager({ dataDir, reqFile, pushLog, runCommand, platfor
 
     if (configChanged && fs.existsSync(venvDir)) {
       pushLog('INFO', `Python 環境設定已變更 (${cfg.pythonMode})，正在重建隔離環境...`);
-      fs.rmSync(venvDir, { recursive: true, force: true });
+      removeDirSafe(venvDir);
       try { fs.unlinkSync(stateFile); } catch {}
     }
 
