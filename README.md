@@ -59,6 +59,12 @@
 
 ---
 
+## 🙏 致謝 (Acknowledgements)
+
+- **[ShazamIO](https://github.com/shazamio/ShazamIO)**（[MIT License](https://github.com/shazamio/ShazamIO?tab=MIT-1-ov-file)）：感謝 ShazamIO 提供非同步 Python Shazam 音訊指紋辨識與時間軸偏移偵測核心能力，讓本模組得以實現即時聽歌識曲與歌詞同步對齊。
+
+---
+
 ## 📝 更新日誌 (Changelog)
 
 ### v0.2
