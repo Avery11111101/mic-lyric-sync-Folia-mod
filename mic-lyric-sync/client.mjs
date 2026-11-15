@@ -6,6 +6,7 @@ import {
   resolveLocale,
   t
 } from './i18n.mjs';
+import { createPlaybackGuard } from './playbackGuard.mjs';
 
 const DEFAULT_POLL_INTERVAL_SEC = 30;
 const MIN_POLL_INTERVAL_SEC = 5;
@@ -85,6 +86,7 @@ export default function activate(folium) {
   let songStartRefMs = 0; // 用於平滑多輪 Shazam 偏移的中位數基準時間
   let anchorSamples = []; // 儲存同一首歌最近 5 輪推算出的 t0 (trackStartWallClockMs)
   const buttonUpdaters = new Set();
+  const playbackGuard = createPlaybackGuard(folium);
 
   const settingsSection = folium.registries.settingsSections.register({
     id: 'prefs',
@@ -280,10 +282,9 @@ export default function activate(folium) {
     }
 
     const song = page.items[0];
-    if (cfg.autoMute) {
-      await folium.playback.setMuted(true);
-    }
+    await playbackGuard.applyBeforePlay(Boolean(cfg.autoMute));
     await folium.playback.playSong(song);
+    await playbackGuard.isolateQueueAfterPlay(song);
     await waitForPlaybackReady(folium, song, 3500);
     if (!syncEnabled) return;
 
@@ -349,6 +350,7 @@ export default function activate(folium) {
       anchorSamples = [];
       const cfg = settingsSection.settings.get();
       const pollIntervalSec = clampPollInterval(cfg.pollIntervalSec);
+      playbackGuard.captureAndApplyOnStart();
       folium.ui.toast(t(loc, 'toast.starting'), { type: 'info', durationMs: 3000 });
       try {
         await folium.rpc.call('startSync', {
@@ -357,6 +359,7 @@ export default function activate(folium) {
         });
       } catch (err) {
         syncEnabled = false;
+        await playbackGuard.restoreOnStop();
         notifyButtons();
         folium.ui.toast(
           t(loc, 'toast.startFailed', { error: err?.message || err }),
@@ -367,7 +370,11 @@ export default function activate(folium) {
       stopSongEndWatcher();
       recognitionPaused = false;
       trackedSongKey = '';
-      await folium.rpc.call('stopSync');
+      try {
+        await folium.rpc.call('stopSync');
+      } finally {
+        await playbackGuard.restoreOnStop();
+      }
       folium.ui.toast(t(loc, 'toast.stopped'), { type: 'info', durationMs: 1800 });
     }
   }
@@ -451,6 +458,7 @@ export default function activate(folium) {
     if (typeof offState === 'function') offState();
     if (typeof offSettingsWatch === 'function') offSettingsWatch();
     void folium.rpc.call('stopSync').catch(() => {});
+    void playbackGuard.restoreOnStop();
     buttonUpdaters.clear();
   };
 }
