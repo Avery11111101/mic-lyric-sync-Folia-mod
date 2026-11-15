@@ -91,9 +91,33 @@ export function createPlaybackGuard(folium) {
     } catch {}
   }
 
-  function captureAndApplyOnStart() {
+  async function captureAndApplyOnStart(autoMute = true) {
     const snap = ensureSnapshot();
     disableLoopPlayback(snap);
+
+    const playback = folium?.playback;
+    if (typeof playback?.pause === 'function') {
+      try {
+        await playback.pause();
+      } catch {}
+    }
+
+    if (typeof playback?.replaceQueue === 'function' && typeof playback?.getQueue === 'function') {
+      try {
+        const currentQueue = playback.getQueue(0, 1);
+        if (currentQueue && typeof currentQueue.version === 'string') {
+          await playback.replaceQueue([], { expectedVersion: currentQueue.version });
+          snap.didChangeQueue = true;
+        }
+      } catch {}
+    }
+
+    if (autoMute && typeof playback?.setMuted === 'function') {
+      snap.didChangeVolumeOrMute = true;
+      try {
+        await playback.setMuted(true);
+      } catch {}
+    }
   }
 
   async function applyBeforePlay(autoMute) {

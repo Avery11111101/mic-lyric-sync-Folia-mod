@@ -4,7 +4,7 @@
   "name": "麥克風即時聽歌同步歌詞",
   "version": "0.3.0",
   "author": "Avery",
-  "description": "內建自動建立隔離 Python 虛擬環境並安裝 shazamio、sounddevice、numpy，透過麥克風即時辨識現場歌曲，並透過 Folia 已登入的線上音源搜尋對應曲目與同步顯示原生全螢幕歌詞。",
+  "description": "會呼叫系統 Python 建立隔離環境並自動安裝執行辨識程式（shazamio、sounddevice、numpy），錄製麥克風音訊並上傳至 Shazam 伺服器進行音樂辨識，再透過 Folia 已登入的線上音源搜尋對應曲目並同步顯示原生全螢幕歌詞。",
   "preview": "preview.png",
   "main": "index.cjs",
   "client": "client.mjs",

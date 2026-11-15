@@ -350,7 +350,7 @@ export default function activate(folium) {
       anchorSamples = [];
       const cfg = settingsSection.settings.get();
       const pollIntervalSec = clampPollInterval(cfg.pollIntervalSec);
-      playbackGuard.captureAndApplyOnStart();
+      await playbackGuard.captureAndApplyOnStart(Boolean(cfg.autoMute));
       folium.ui.toast(t(loc, 'toast.starting'), { type: 'info', durationMs: 3000 });
       try {
         await folium.rpc.call('startSync', {

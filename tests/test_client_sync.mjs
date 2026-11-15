@@ -120,3 +120,80 @@ test('activate 預設 30 秒間隔、播畢前暫停、播畢或關閉選項後�
 
   cleanup();
 });
+
+test('按下開始辨識時立即暫停播放、清空佇列並靜音，停止時恢復原狀態', async (t) => {
+  let cleanup = null;
+  t.after(() => {
+    if (cleanup) cleanup();
+  });
+
+  let toggleCommand = null;
+  const oldSong = { source: 'test', id: 'old-1' };
+  let queueItems = [{ song: oldSong }];
+  let queueVersion = 'v1';
+  let paused = false;
+  let muted = false;
+  let loopMode = 'all';
+
+  const folium = {
+    env: { context: 'main' },
+    host: { folium: { minor: 7 } },
+    log: { info: () => {}, warn: () => {} },
+    ui: { toast: () => {}, navigate: () => {}, icon: async () => null },
+    omni: { searchSongs: async () => ({ items: [] }) },
+    playback: {
+      getState: () => ({ song: queueItems[0]?.song || null, state: paused ? 'paused' : 'playing', position: 0, duration: 100 }),
+      getLoopMode: () => loopMode,
+      setLoopMode: (m) => { loopMode = m; },
+      getVolume: () => ({ volume: 0.8, muted }),
+      setVolume: async () => {},
+      setMuted: async (m) => { muted = m; },
+      pause: async () => { paused = true; },
+      getQueue: (offset, limit) => ({
+        version: queueVersion,
+        length: queueItems.length,
+        items: queueItems.slice(offset, offset + limit)
+      }),
+      replaceQueue: async (songs) => {
+        queueItems = songs.map((s) => ({ song: s }));
+        queueVersion = `v-${Date.now()}`;
+      }
+    },
+    rpc: {
+      on: () => () => {},
+      call: async () => ({ ok: true })
+    },
+    registries: {
+      settingsSections: {
+        register: (sec) => {
+          const settings = {};
+          for (const s of sec.settings) settings[s.key] = s.defaultValue;
+          return { settings: { get: () => ({ ...settings }), onChange: () => () => {} } };
+        }
+      },
+      commands: {
+        register: (cmd) => {
+          if (cmd.id === 'toggle-sync') toggleCommand = cmd;
+        }
+      },
+      progressButtons: { register: () => {} }
+    }
+  };
+
+  cleanup = activate(folium);
+
+  // 開啟辨識：應立即暫停、清空佇列、靜音並關閉循環
+  await toggleCommand.run();
+  assert.equal(paused, true);
+  assert.equal(queueItems.length, 0);
+  assert.equal(muted, true);
+  assert.equal(loopMode, 'off');
+
+  // 關閉辨識：應恢復原佇列、取消靜音與恢復原循環模式
+  await toggleCommand.run();
+  assert.deepEqual(queueItems.map((i) => i.song), [oldSong]);
+  assert.equal(muted, false);
+  assert.equal(loopMode, 'all');
+
+  cleanup();
+});
