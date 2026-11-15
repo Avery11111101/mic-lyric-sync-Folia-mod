@@ -26,7 +26,31 @@ module.exports = function activate(api) {
 
   const logHistory = [];
   let cachedMics = { current_device_id: null, devices: [] };
+  let pendingMicWaiters = [];
   let latestState = { ok: false, title: '', artist: '', position_sec: 0, updated_at_ms: 0 };
+
+  function flushMicWaiters(result) {
+    if (pendingMicWaiters.length === 0) return;
+    const waiters = pendingMicWaiters.splice(0, pendingMicWaiters.length);
+    for (const w of waiters) {
+      clearTimeout(w.timer);
+      w.resolve(result);
+    }
+  }
+
+  function waitForNextMics(timeoutMs = 5000) {
+    return new Promise((resolve) => {
+      const waiter = {
+        resolve,
+        timer: setTimeout(() => {
+          const idx = pendingMicWaiters.indexOf(waiter);
+          if (idx !== -1) pendingMicWaiters.splice(idx, 1);
+          resolve(cachedMics);
+        }, timeoutMs)
+      };
+      pendingMicWaiters.push(waiter);
+    });
+  }
 
   function pushLog(level, text) {
     const line = `[${new Date().toTimeString().slice(0, 8)}] [${level}] ${text}`;
@@ -159,6 +183,7 @@ module.exports = function activate(api) {
         current_device_id: msg.current_device_id ?? null,
         devices: Array.isArray(msg.devices) ? msg.devices : []
       };
+      flushMicWaiters(cachedMics);
       if (!disposed) {
         try { api.rpc.send('mics', cachedMics); } catch {}
       }
@@ -237,6 +262,7 @@ module.exports = function activate(api) {
   }
 
   function stopWorker() {
+    flushMicWaiters(cachedMics);
     if (!proc) return;
     const target = proc;
     proc = null;
@@ -280,8 +306,12 @@ module.exports = function activate(api) {
 
   api.rpc.handle('listMics', async () => {
     await ensureWorker();
-    sendCmd({ cmd: 'list_mics' });
-    return cachedMics;
+    const waitPromise = waitForNextMics(5000);
+    if (!sendCmd({ cmd: 'list_mics' })) {
+      flushMicWaiters(cachedMics);
+      return cachedMics;
+    }
+    return await waitPromise;
   });
 
   api.rpc.handle('selectMic', async (deviceId) => {
