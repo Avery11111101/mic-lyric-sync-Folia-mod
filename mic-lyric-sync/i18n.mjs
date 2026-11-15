@@ -62,7 +62,16 @@ export const TRANSLATIONS = {
     'toast.pkgUpdateFailed': '更新失敗：{error}',
     'log.resumeAfterSongEnd': '歌曲已播放完畢，繼續麥克風辨識',
     'log.resumeOptionDisabled': '已關閉「播畢前不重複辨識」，恢復定期辨識',
-    'warn.requireFolium': '此模組需要 Folium 1.7 以上版本 (folium.omni / folium.rpc)'
+    'warn.requireFolium': '此模組需要 Folium 1.7 以上版本 (folium.omni / folium.rpc)',
+    'setting.pythonMode': 'Python 環境來源',
+    'setting.customPythonPath': '自訂 Python 執行檔路徑',
+    'panel.pythonModeLabel': 'Python 環境來源（變更後點下方「檢查／更新」即套用）',
+    'panel.pythonMode.auto': '自動（優先系統 Python，無則自動下載）',
+    'panel.pythonMode.system': '僅使用系統 Python',
+    'panel.pythonMode.custom': '自訂 Python 路徑',
+    'panel.pythonMode.managed': '自動下載免安裝 Python（uv）',
+    'panel.customPythonPathLabel': '自訂 Python 執行檔路徑',
+    'panel.customPythonPathPlaceholder': '例如 C:\\Python312\\python.exe 或 /usr/bin/python3'
   },
   'zh-CN': {
     'section.label': '麦克风听歌同步',
@@ -122,7 +131,16 @@ export const TRANSLATIONS = {
     'toast.pkgUpdateFailed': '更新失败：{error}',
     'log.resumeAfterSongEnd': '歌曲已播放完毕，继续麦克风识别',
     'log.resumeOptionDisabled': '已关闭「播毕前不重复识别」，恢复定期识别',
-    'warn.requireFolium': '此模块需要 Folium 1.7 以上版本 (folium.omni / folium.rpc)'
+    'warn.requireFolium': '此模块需要 Folium 1.7 以上版本 (folium.omni / folium.rpc)',
+    'setting.pythonMode': 'Python 环境来源',
+    'setting.customPythonPath': '自定义 Python 可执行文件路径',
+    'panel.pythonModeLabel': 'Python 环境来源（更改后点击下方“检查／更新”即生效）',
+    'panel.pythonMode.auto': '自动（优先系统 Python，无则自动下载）',
+    'panel.pythonMode.system': '仅使用系统 Python',
+    'panel.pythonMode.custom': '自定义 Python 路径',
+    'panel.pythonMode.managed': '自动下载便携版 Python（uv）',
+    'panel.customPythonPathLabel': '自定义 Python 可执行文件路径',
+    'panel.customPythonPathPlaceholder': '例如 C:\\Python312\\python.exe 或 /usr/bin/python3'
   },
   ja: {
     'section.label': 'マイク歌詞同期',
@@ -182,7 +200,16 @@ export const TRANSLATIONS = {
     'toast.pkgUpdateFailed': '更新失敗：{error}',
     'log.resumeAfterSongEnd': '再生が終了したため、マイク認識を再開します',
     'log.resumeOptionDisabled': '「再生終了まで再認識しない」がオフになったため、定期認識を再開します',
-    'warn.requireFolium': 'このモジュールには Folium 1.7 以上が必要です (folium.omni / folium.rpc)'
+    'warn.requireFolium': 'このモジュールには Folium 1.7 以上が必要です (folium.omni / folium.rpc)',
+    'setting.pythonMode': 'Python 環境ソース',
+    'setting.customPythonPath': 'カスタム Python 実行ファイルパス',
+    'panel.pythonModeLabel': 'Python 環境ソース（変更後、下の「確認／更新」で適用）',
+    'panel.pythonMode.auto': '自動（システム Python 優先、なければ自動ダウンロード）',
+    'panel.pythonMode.system': 'システム Python のみ使用',
+    'panel.pythonMode.custom': 'カスタム Python パス',
+    'panel.pythonMode.managed': 'ポータブル Python を自動ダウンロード（uv）',
+    'panel.customPythonPathLabel': 'カスタム Python 実行ファイルパス',
+    'panel.customPythonPathPlaceholder': '例: C:\\Python312\\python.exe または /usr/bin/python3'
   },
   en: {
     'section.label': 'Mic Lyric Sync',
@@ -242,7 +269,16 @@ export const TRANSLATIONS = {
     'toast.pkgUpdateFailed': 'Update failed: {error}',
     'log.resumeAfterSongEnd': 'Song ended; resuming microphone recognition',
     'log.resumeOptionDisabled': 'Disabled "Pause Until Song Ends"; resuming periodic recognition',
-    'warn.requireFolium': 'This module requires Folium 1.7+ (folium.omni / folium.rpc)'
+    'warn.requireFolium': 'This module requires Folium 1.7+ (folium.omni / folium.rpc)',
+    'setting.pythonMode': 'Python Environment Source',
+    'setting.customPythonPath': 'Custom Python Executable Path',
+    'panel.pythonModeLabel': 'Python Environment Source (click Update below to apply)',
+    'panel.pythonMode.auto': 'Auto (System Python first, auto-download if missing)',
+    'panel.pythonMode.system': 'System Python only',
+    'panel.pythonMode.custom': 'Custom Python path',
+    'panel.pythonMode.managed': 'Auto-download portable Python (uv)',
+    'panel.customPythonPathLabel': 'Custom Python Executable Path',
+    'panel.customPythonPathPlaceholder': 'e.g. C:\\Python312\\python.exe or /usr/bin/python3'
   }
 };
 

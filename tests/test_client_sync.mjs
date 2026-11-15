@@ -100,7 +100,12 @@ test('activate 預設 30 秒間隔、播畢前暫停、播畢或關閉選項後�
 
   // 開啟辨識時，帶入預設 30 秒間隔
   await toggleCommand.run();
-  assert.deepEqual(rpcCalls[0], ['startSync', { deviceId: '', pollIntervalSec: 30 }]);
+  assert.deepEqual(rpcCalls[0], ['startSync', {
+    deviceId: '',
+    pollIntervalSec: 30,
+    pythonMode: 'auto',
+    customPythonPath: ''
+  }]);
 
   // 模擬辨識成功，應自動呼叫 setRecognitionPaused(true)
   stateHandler({ ok: true, title: 'Song A', artist: 'Artist A', position_sec: 12 });

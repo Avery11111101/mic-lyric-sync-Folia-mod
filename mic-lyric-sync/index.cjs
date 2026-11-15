@@ -1,9 +1,8 @@
 // index.cjs — Folium main 入口：自動建立隔離 venv、自動安裝/更新套件，並託管內建 Python 辨識子行程
 const { spawn } = require('child_process');
-const fs = require('fs');
 const path = require('path');
+const { createPythonEnvManager } = require('./pythonEnv.cjs');
 
-const UPDATE_INTERVAL_MS = 7 * 24 * 60 * 60 * 1000; // 每 7 天自動檢查更新一次
 const DEFAULT_POLL_INTERVAL_SEC = 30;
 const MIN_POLL_INTERVAL_SEC = 5;
 const MAX_POLL_INTERVAL_SEC = 300;
@@ -79,12 +78,12 @@ module.exports = function activate(api) {
     }
   }
 
-  function runCommand(cmd, args, onLine) {
+  function runCommand(cmd, args, onLine, extraEnv = {}) {
     return new Promise((resolve, reject) => {
       const child = spawn(cmd, args, {
         cwd: getSafeCwd(),
         windowsHide: true,
-        env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUNBUFFERED: '1' },
+        env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUNBUFFERED: '1', ...extraEnv },
         stdio: ['ignore', 'pipe', 'pipe']
       });
       child.on('error', reject);
@@ -104,67 +103,16 @@ module.exports = function activate(api) {
     });
   }
 
-  async function findSystemPython() {
-    const candidates = process.platform === 'win32'
-      ? [['python', []], ['py', ['-3']], ['python3', []]]
-      : [['python3', []], ['python', []]];
-    for (const [cmd, baseArgs] of candidates) {
-      try {
-        await runCommand(cmd, [...baseArgs, '--version']);
-        return [cmd, baseArgs];
-      } catch {}
-    }
-    throw new Error('找不到系統 Python，請先安裝 Python 3.10+ 並勾選 Add Python to PATH');
-  }
+  const pythonEnv = createPythonEnvManager({
+    dataDir: api.storage.paths.data,
+    reqFile: path.join(__dirname, 'requirements.txt'),
+    pushLog,
+    runCommand
+  });
 
   async function ensureEnvironment(forceUpgrade = false) {
     if (bootstrapPromise) return bootstrapPromise;
-
-    bootstrapPromise = (async () => {
-      const dataDir = api.storage.paths.data;
-      const venvDir = path.join(dataDir, 'venv');
-      const venvPython = process.platform === 'win32'
-        ? path.join(venvDir, 'Scripts', 'python.exe')
-        : path.join(venvDir, 'bin', 'python');
-      const stateFile = path.join(dataDir, 'pip_state.json');
-      const reqFile = path.join(__dirname, 'requirements.txt');
-
-      if (!fs.existsSync(venvPython)) {
-        pushLog('INFO', '首次使用：正在搜尋系統 Python 並建立模組專屬隔離環境 (venv)...');
-        const [sysCmd, sysArgs] = await findSystemPython();
-        await runCommand(sysCmd, [...sysArgs, '-m', 'venv', venvDir], (line) => pushLog('INFO', line));
-        pushLog('INFO', '隔離環境建立完成');
-      }
-
-      let pkgsReady = false;
-      try {
-        await runCommand(venvPython, ['-c', 'import shazamio, sounddevice, numpy']);
-        pkgsReady = true;
-      } catch {
-        pkgsReady = false;
-      }
-
-      let lastCheck = 0;
-      try {
-        const saved = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
-        lastCheck = Number(saved.lastUpgradeAt || 0);
-      } catch {}
-
-      const needUpgrade = forceUpgrade || !pkgsReady || (Date.now() - lastCheck > UPDATE_INTERVAL_MS);
-      if (needUpgrade) {
-        pushLog('INFO', pkgsReady ? '正在檢查並更新 Python 套件...' : '正在自動安裝辨識所需 Python 套件 (shazamio / sounddevice / numpy)...');
-        await runCommand(
-          venvPython,
-          ['-m', 'pip', 'install', '--disable-pip-version-check', '--upgrade', '-r', reqFile],
-          (line) => pushLog('INFO', line)
-        );
-        fs.writeFileSync(stateFile, JSON.stringify({ lastUpgradeAt: Date.now() }), 'utf8');
-        pushLog('INFO', 'Python 套件準備與更新完成！');
-      }
-
-      return venvPython;
-    })();
-
+    bootstrapPromise = pythonEnv.ensureEnvironment(forceUpgrade);
     try {
       return await bootstrapPromise;
     } finally {
@@ -272,7 +220,21 @@ module.exports = function activate(api) {
     } catch {}
   }
 
+  api.rpc.handle('setPythonConfig', (cfg = {}) => {
+    return { ok: true, config: pythonEnv.setConfig(cfg) };
+  });
+
+  api.rpc.handle('getPythonConfig', () => {
+    return pythonEnv.getConfig();
+  });
+
   api.rpc.handle('startSync', async (opts = {}) => {
+    if (opts && (opts.pythonMode !== undefined || opts.customPythonPath !== undefined)) {
+      pythonEnv.setConfig({
+        pythonMode: opts.pythonMode ?? pythonEnv.getConfig().pythonMode,
+        customPythonPath: opts.customPythonPath ?? pythonEnv.getConfig().customPythonPath
+      });
+    }
     await ensureWorker();
     if (opts && opts.deviceId !== undefined && opts.deviceId !== '') {
       sendCmd({ cmd: 'select_mic', device_id: Number(opts.deviceId) });
@@ -326,7 +288,13 @@ module.exports = function activate(api) {
     return { ok: true };
   });
 
-  api.rpc.handle('updatePackages', async () => {
+  api.rpc.handle('updatePackages', async (opts = {}) => {
+    if (opts && (opts.pythonMode !== undefined || opts.customPythonPath !== undefined)) {
+      pythonEnv.setConfig({
+        pythonMode: opts.pythonMode ?? pythonEnv.getConfig().pythonMode,
+        customPythonPath: opts.customPythonPath ?? pythonEnv.getConfig().customPythonPath
+      });
+    }
     stopWorker();
     await ensureEnvironment(true);
     await ensureWorker();

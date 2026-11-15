@@ -100,6 +100,18 @@ export default function activate(folium) {
         defaultValue: 'auto'
       },
       {
+        key: 'pythonMode',
+        type: 'text',
+        label: getLocaleMap('setting.pythonMode'),
+        defaultValue: 'auto'
+      },
+      {
+        key: 'customPythonPath',
+        type: 'text',
+        label: getLocaleMap('setting.customPythonPath'),
+        defaultValue: ''
+      },
+      {
         key: 'micDeviceId',
         type: 'text',
         label: getLocaleMap('setting.micDeviceId'),
@@ -330,6 +342,10 @@ export default function activate(folium) {
   const offSettingsWatch = settingsSection.settings.onChange((nextCfg) => {
     const intervalSec = clampPollInterval(nextCfg?.pollIntervalSec);
     void folium.rpc.call('setPollInterval', intervalSec).catch(() => {});
+    void folium.rpc.call('setPythonConfig', {
+      pythonMode: nextCfg?.pythonMode || 'auto',
+      customPythonPath: nextCfg?.customPythonPath || ''
+    }).catch(() => {});
     if (syncEnabled && recognitionPaused && nextCfg?.pauseUntilSongEnd === false) {
       void resumeRecognitionFromPause('log.resumeOptionDisabled');
     }
@@ -355,7 +371,9 @@ export default function activate(folium) {
       try {
         await folium.rpc.call('startSync', {
           deviceId: cfg.micDeviceId || '',
-          pollIntervalSec
+          pollIntervalSec,
+          pythonMode: cfg.pythonMode || 'auto',
+          customPythonPath: cfg.customPythonPath || ''
         });
       } catch (err) {
         syncEnabled = false;
@@ -535,6 +553,43 @@ function mountSettingsPanel(container, panelCtx, folium) {
   langWrap.append(langTitle, langSelect);
   root.appendChild(langWrap);
 
+  const pyWrap = document.createElement('div');
+  pyWrap.style.cssText = 'display:flex;flex-direction:column;gap:6px;';
+  const pyTitle = document.createElement('span');
+  pyTitle.style.cssText = 'font-size:12px;opacity:0.85;';
+  const pySelect = document.createElement('select');
+  pySelect.style.cssText = inputStyle;
+  const pyAutoOpt = document.createElement('option');
+  pyAutoOpt.value = 'auto';
+  const pySystemOpt = document.createElement('option');
+  pySystemOpt.value = 'system';
+  const pyCustomOpt = document.createElement('option');
+  pyCustomOpt.value = 'custom';
+  const pyManagedOpt = document.createElement('option');
+  pyManagedOpt.value = 'managed';
+  pySelect.append(pyAutoOpt, pySystemOpt, pyCustomOpt, pyManagedOpt);
+
+  const pyCustomWrap = document.createElement('label');
+  pyCustomWrap.style.cssText = 'display:none;flex-direction:column;gap:4px;';
+  const pyCustomTitle = document.createElement('span');
+  pyCustomTitle.style.cssText = 'font-size:12px;opacity:0.85;';
+  const pyCustomInput = document.createElement('input');
+  pyCustomInput.type = 'text';
+  pyCustomInput.style.cssText = inputStyle;
+  pyCustomWrap.append(pyCustomTitle, pyCustomInput);
+
+  pySelect.addEventListener('change', () => {
+    const mode = pySelect.value || 'auto';
+    pyCustomWrap.style.display = mode === 'custom' ? 'flex' : 'none';
+    panelCtx.settings.set({ pythonMode: mode });
+  });
+  pyCustomInput.addEventListener('change', () => {
+    panelCtx.settings.set({ customPythonPath: pyCustomInput.value.trim() });
+  });
+
+  pyWrap.append(pyTitle, pySelect, pyCustomWrap);
+  root.appendChild(pyWrap);
+
   const micBox = document.createElement('div');
   micBox.style.cssText = [
     'display:flex',
@@ -650,7 +705,11 @@ function mountSettingsPanel(container, panelCtx, folium) {
     updatePkgBtn.disabled = true;
     updatePkgBtn.textContent = t(loc, 'panel.updatingPkg');
     try {
-      await folium.rpc.call('updatePackages');
+      const cur = panelCtx.settings.get();
+      await folium.rpc.call('updatePackages', {
+        pythonMode: cur?.pythonMode || 'auto',
+        customPythonPath: cur?.customPythonPath || ''
+      });
       folium.ui.toast(t(getPanelLocale(), 'toast.pkgUpdated'), { type: 'success', durationMs: 2500 });
     } catch (err) {
       folium.ui.toast(
@@ -713,6 +772,14 @@ function mountSettingsPanel(container, panelCtx, folium) {
     langZhCnOpt.textContent = t(loc, 'setting.language.zh-CN');
     langJaOpt.textContent = t(loc, 'setting.language.ja');
     langEnOpt.textContent = t(loc, 'setting.language.en');
+
+    pyTitle.textContent = t(loc, 'panel.pythonModeLabel');
+    pyAutoOpt.textContent = t(loc, 'panel.pythonMode.auto');
+    pySystemOpt.textContent = t(loc, 'panel.pythonMode.system');
+    pyCustomOpt.textContent = t(loc, 'panel.pythonMode.custom');
+    pyManagedOpt.textContent = t(loc, 'panel.pythonMode.managed');
+    pyCustomTitle.textContent = t(loc, 'panel.customPythonPathLabel');
+    pyCustomInput.placeholder = t(loc, 'panel.customPythonPathPlaceholder');
 
     micTitle.textContent = t(loc, 'mic.panelTitle');
     refreshBtn.textContent = scanning ? t(loc, 'mic.scanning') : t(loc, 'mic.rescan');
@@ -813,6 +880,10 @@ function mountSettingsPanel(container, panelCtx, folium) {
   function syncFromSettings() {
     const v = panelCtx.settings.get();
     langSelect.value = v.language || 'auto';
+    const pyMode = v.pythonMode || 'auto';
+    pySelect.value = pyMode;
+    pyCustomInput.value = v.customPythonPath || '';
+    pyCustomWrap.style.display = pyMode === 'custom' ? 'flex' : 'none';
     micSelect.value = v.micDeviceId || '';
     pollIntervalField.input.value = String(clampPollInterval(v.pollIntervalSec));
     pauseUntilEndField.input.checked = v.pauseUntilSongEnd !== false;
