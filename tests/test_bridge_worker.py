@@ -144,6 +144,80 @@ class TestBridgeWorker(unittest.TestCase):
         self.assertEqual(res_err, [])
         mock_log.assert_called_once()
 
+    def test_ensure_stream_falls_back_from_mme_error_to_wasapi(self):
+        fake_devices = [
+            {"name": "Microphone (USB)", "max_input_channels": 2, "default_samplerate": 44100.0, "hostapi": 0},
+            {"name": "Microphone (USB)", "max_input_channels": 2, "default_samplerate": 48000.0, "hostapi": 1},
+        ]
+        fake_hostapis = [
+            {"name": "MME", "default_input_device": 0},
+            {"name": "Windows WASAPI", "default_input_device": 1},
+        ]
+        attempts = []
+
+        class FakeStream:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+                self.latency = 0.02
+                self.closed = False
+
+            def start(self):
+                attempts.append((self.kwargs["device"], self.kwargs["channels"], self.kwargs["samplerate"]))
+                if self.kwargs["device"] == 0:
+                    raise RuntimeError("Error opening InputStream: Unanticipated host error [PaErrorCode -9999] [MME error 11]")
+
+            def close(self):
+                self.closed = True
+
+        engine = bw.WorkerEngine()
+        with (
+            patch.object(bw.sd, "query_devices", return_value=fake_devices),
+            patch.object(bw.sd, "query_hostapis", return_value=fake_hostapis),
+            patch.object(bw.sd, "default", types.SimpleNamespace(device=(0, 0))),
+            patch.object(bw.sd, "InputStream", side_effect=lambda **kw: FakeStream(**kw), create=True),
+            patch.object(bw, "emit_log") as mock_log,
+        ):
+            engine.ensure_stream()
+
+        self.assertIsNotNone(engine.stream)
+        self.assertEqual(engine.stream.kwargs["device"], 1)
+        self.assertEqual(engine.samplerate, 48000)
+        self.assertTrue(any(dev == 0 for dev, _, _ in attempts))
+        self.assertEqual(attempts[-1], (1, 1, 48000))
+        mock_log.assert_called_once()
+
+    def test_ensure_stream_refreshes_portaudio_and_raises_clear_error_when_all_fail(self):
+        fake_devices = [
+            {"name": "Mic", "max_input_channels": 1, "default_samplerate": 44100.0, "hostapi": 0},
+        ]
+        fake_hostapis = [{"name": "MME", "default_input_device": 0}]
+        closed_streams = []
+
+        class FailingStream:
+            def __init__(self, **_kwargs):
+                pass
+
+            def start(self):
+                raise RuntimeError("MME error 11")
+
+            def close(self):
+                closed_streams.append(True)
+
+        engine = bw.WorkerEngine()
+        with (
+            patch.object(bw.sd, "query_devices", return_value=fake_devices),
+            patch.object(bw.sd, "query_hostapis", return_value=fake_hostapis),
+            patch.object(bw.sd, "default", types.SimpleNamespace(device=(0, 0))),
+            patch.object(bw.sd, "InputStream", side_effect=lambda **kw: FailingStream(**kw), create=True),
+            patch.object(bw, "_refresh_portaudio") as mock_refresh,
+        ):
+            with self.assertRaises(RuntimeError) as ctx:
+                engine.ensure_stream()
+
+        self.assertIn("無法開啟麥克風輸入串流", str(ctx.exception))
+        mock_refresh.assert_called_once()
+        self.assertGreater(len(closed_streams), 0)
+
 
 if __name__ == "__main__":
     unittest.main()

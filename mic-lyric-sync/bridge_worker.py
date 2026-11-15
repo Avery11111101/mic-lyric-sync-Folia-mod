@@ -78,15 +78,34 @@ def _resolve_default_input_index(hostapis: list[dict] | tuple[dict, ...]) -> int
     return None
 
 
+def _refresh_portaudio() -> None:
+    """安全重新初始化 PortAudio 裝置列表。"""
+    try:
+        if hasattr(sd, "_terminate") and hasattr(sd, "_initialize"):
+            sd._terminate()
+            sd._initialize()
+    except Exception:
+        pass
+
+
+def _hostapi_priority(api_name: str) -> int:
+    """為備援裝置排序 HostAPI 優先順序（避開 Windows MME error 11）。"""
+    lowered = api_name.lower()
+    if "wasapi" in lowered:
+        return 0
+    if "directsound" in lowered:
+        return 1
+    if "mme" in lowered:
+        return 2
+    if "wdm-ks" in lowered:
+        return 3
+    return 4
+
+
 def list_input_devices(refresh: bool = False) -> list[dict]:
     """列舉目前可用的麥克風輸入裝置清單。"""
     if refresh:
-        try:
-            if hasattr(sd, "_terminate") and hasattr(sd, "_initialize"):
-                sd._terminate()
-                sd._initialize()
-        except Exception:
-            pass
+        _refresh_portaudio()
 
     try:
         devices = sd.query_devices()
@@ -187,26 +206,142 @@ class WorkerEngine:
                     dropped = self._chunks.popleft()
                     self._total_samples -= len(dropped)
 
+    @staticmethod
+    def _build_stream_candidates(target_device_id: int | None) -> list[dict]:
+        """建立麥克風輸入串流的裝置與參數備援清單。"""
+        try:
+            devices = list(sd.query_devices() or [])
+        except Exception:
+            devices = []
+        try:
+            hostapis = list(sd.query_hostapis() or [])
+        except Exception:
+            hostapis = []
+
+        def api_name_for(dev: dict) -> str:
+            idx = dev.get("hostapi")
+            if isinstance(idx, int) and 0 <= idx < len(hostapis):
+                return str(hostapis[idx].get("name") or "").strip()
+            return ""
+
+        candidates: list[dict] = []
+        seen_ids: set[int | None] = set()
+
+        def add_candidate(dev_id: int | None, dev_info: dict | None, fallback: bool = False) -> None:
+            if dev_id in seen_ids:
+                return
+            seen_ids.add(dev_id)
+            info = dev_info if isinstance(dev_info, dict) else {}
+            max_ch = int(info.get("max_input_channels", 1) or 1)
+            default_sr = int(info.get("default_samplerate") or SAMPLE_RATE)
+            name = str(info.get("name") or (f"Device {dev_id}" if dev_id is not None else "預設麥克風")).strip()
+            api = api_name_for(info)
+            channels_list = [1] + ([min(2, max_ch)] if max_ch >= 2 else [])
+            rates_list: list[int] = []
+            for sr in (default_sr, 48000, SAMPLE_RATE, 16000):
+                if sr > 0 and sr not in rates_list:
+                    rates_list.append(sr)
+            candidates.append(
+                {
+                    "device_id": dev_id,
+                    "name": f"{name} ({api})" if api else name,
+                    "raw_name": name,
+                    "channels_list": channels_list,
+                    "rates_list": rates_list,
+                    "fallback": fallback,
+                }
+            )
+
+        primary_id = target_device_id if target_device_id is not None else _resolve_default_input_index(hostapis)
+        primary_info: dict | None = None
+        if primary_id is not None and 0 <= primary_id < len(devices):
+            primary_info = devices[primary_id]
+            add_candidate(primary_id, primary_info, fallback=False)
+        else:
+            try:
+                queried = sd.query_devices(target_device_id, kind="input")
+                if isinstance(queried, dict):
+                    primary_info = queried
+            except Exception:
+                primary_info = None
+            add_candidate(target_device_id, primary_info, fallback=False)
+
+        primary_raw_name = str(primary_info.get("name") or "").strip().lower() if isinstance(primary_info, dict) else ""
+
+        other_inputs: list[tuple[int, int, dict]] = []
+        for idx, dev in enumerate(devices):
+            try:
+                if int(dev.get("max_input_channels", 0) or 0) <= 0:
+                    continue
+                other_inputs.append((_hostapi_priority(api_name_for(dev)), idx, dev))
+            except Exception:
+                continue
+        other_inputs.sort(key=lambda item: (item[0], item[1]))
+
+        if primary_raw_name:
+            for _, idx, dev in other_inputs:
+                if str(dev.get("name") or "").strip().lower() == primary_raw_name:
+                    add_candidate(idx, dev, fallback=True)
+
+        if target_device_id is None:
+            for _, idx, dev in other_inputs:
+                add_candidate(idx, dev, fallback=True)
+
+        return candidates
+
+    def _try_open_stream(self, candidates: list[dict]) -> tuple[object, dict, int] | tuple[None, None, Exception | None]:
+        """依序嘗試開啟麥克風串流，失敗時安全關閉暫存物件並記錄最後錯誤。"""
+        last_exc: Exception | None = None
+        for cand in candidates:
+            for channels in cand["channels_list"]:
+                for samplerate in cand["rates_list"]:
+                    stream = None
+                    try:
+                        stream = sd.InputStream(
+                            device=cand["device_id"],
+                            channels=channels,
+                            samplerate=samplerate,
+                            dtype="float32",
+                            callback=self._audio_callback,
+                        )
+                        stream.start()
+                        return stream, cand, samplerate
+                    except Exception as exc:
+                        last_exc = exc
+                        if stream is not None:
+                            try:
+                                stream.close()
+                            except Exception:
+                                pass
+        return None, None, last_exc
+
     def ensure_stream(self) -> None:
         if self.stream is not None:
             return
-        dev_info = sd.query_devices(self.device_id, kind="input")
-        self.samplerate = int(dev_info.get("default_samplerate") or SAMPLE_RATE)
-        self.max_samples = int(self.samplerate * (WINDOW_SEC + 2))
         with self._lock:
             self._chunks.clear()
             self._total_samples = 0
 
-        self.stream = sd.InputStream(
-            device=self.device_id,
-            channels=1,
-            samplerate=self.samplerate,
-            dtype="float32",
-            callback=self._audio_callback,
-        )
-        self.stream.start()
+        candidates = self._build_stream_candidates(self.device_id)
+        stream, chosen, samplerate = self._try_open_stream(candidates)
+        if stream is None:
+            _refresh_portaudio()
+            candidates = self._build_stream_candidates(self.device_id)
+            stream, chosen, samplerate = self._try_open_stream(candidates)
+
+        if stream is None or chosen is None:
+            last_err = samplerate
+            raise RuntimeError(f"無法開啟麥克風輸入串流（請確認系統隱私權已允許麥克風存取，或於設定中改選其他麥克風裝置）：{last_err}")
+
+        self.stream = stream
+        self.samplerate = int(samplerate)
+        self.max_samples = int(self.samplerate * (WINDOW_SEC + 2))
         self.stream_latency = float(getattr(self.stream, "latency", 0.0) or 0.0)
-        emit_log("INFO", f"麥克風已開啟：[{self.device_id}] {dev_info['name']} ({self.samplerate}Hz, 緩衝延遲={self.stream_latency*1000:.0f}ms)")
+        fallback_note = "（已自動切換相容驅動）" if chosen.get("fallback") else ""
+        emit_log(
+            "INFO",
+            f"麥克風已開啟{fallback_note}：[{chosen['device_id']}] {chosen['name']} ({self.samplerate}Hz, 緩衝延遲={self.stream_latency*1000:.0f}ms)",
+        )
 
     def stop_stream_if_idle(self) -> None:
         if not self.sync_active and not self.test_active and self.stream is not None:
@@ -384,47 +519,58 @@ def stdin_reader(loop: asyncio.AbstractEventLoop, engine: WorkerEngine) -> None:
 
         def handle(m=msg):
             cmd = m.get("cmd")
-            if cmd == "list_mics":
-                devices = list_input_devices(refresh=(engine.stream is None))
-                emit({"type": "mics", "current_device_id": engine.device_id, "devices": devices})
-            elif cmd == "select_mic":
-                engine.select_mic(m.get("device_id"))
-            elif cmd == "set_test":
-                engine.test_active = bool(m.get("enabled"))
-                if engine.test_active:
+            try:
+                if cmd == "list_mics":
+                    devices = list_input_devices(refresh=(engine.stream is None))
+                    emit({"type": "mics", "current_device_id": engine.device_id, "devices": devices})
+                elif cmd == "select_mic":
+                    engine.select_mic(m.get("device_id"))
+                elif cmd == "set_test":
+                    engine.test_active = bool(m.get("enabled"))
+                    if engine.test_active:
+                        engine.ensure_stream()
+                    else:
+                        engine.stop_stream_if_idle()
+                elif cmd == "start_sync":
+                    if "poll_interval_sec" in m:
+                        engine.poll_interval_sec = clamp_poll_interval(m.get("poll_interval_sec"))
+                    engine.sync_active = True
+                    engine.recognition_paused = False
+                    engine.clear_audio_buffer()
                     engine.ensure_stream()
-                else:
+                    engine.wake()
+                    emit_log("INFO", f"開始收集麥克風滑動視窗音訊（辨識間隔 {engine.poll_interval_sec:.0f} 秒）...")
+                elif cmd == "stop_sync":
+                    engine.sync_active = False
+                    engine.recognition_paused = False
+                    engine.clear_audio_buffer()
                     engine.stop_stream_if_idle()
-            elif cmd == "start_sync":
-                if "poll_interval_sec" in m:
-                    engine.poll_interval_sec = clamp_poll_interval(m.get("poll_interval_sec"))
-                engine.sync_active = True
-                engine.recognition_paused = False
-                engine.clear_audio_buffer()
-                engine.ensure_stream()
-                engine.wake()
-                emit_log("INFO", f"開始收集麥克風滑動視窗音訊（辨識間隔 {engine.poll_interval_sec:.0f} 秒）...")
-            elif cmd == "stop_sync":
-                engine.sync_active = False
-                engine.recognition_paused = False
-                engine.clear_audio_buffer()
-                engine.stop_stream_if_idle()
-                engine.wake()
-            elif cmd == "set_poll_interval":
-                engine.set_poll_interval(m.get("seconds"))
-            elif cmd == "pause_recognition":
-                if engine.sync_active:
-                    engine.set_recognition_paused(True)
-            elif cmd == "resume_recognition":
-                if engine.sync_active:
-                    engine.set_recognition_paused(False)
-            elif cmd == "quit":
-                engine.should_quit = True
-                engine.sync_active = False
-                engine.recognition_paused = False
-                engine.test_active = False
-                engine.stop_stream_if_idle()
-                engine.wake()
+                    engine.wake()
+                elif cmd == "set_poll_interval":
+                    engine.set_poll_interval(m.get("seconds"))
+                elif cmd == "pause_recognition":
+                    if engine.sync_active:
+                        engine.set_recognition_paused(True)
+                elif cmd == "resume_recognition":
+                    if engine.sync_active:
+                        engine.set_recognition_paused(False)
+                elif cmd == "quit":
+                    engine.should_quit = True
+                    engine.sync_active = False
+                    engine.recognition_paused = False
+                    engine.test_active = False
+                    engine.stop_stream_if_idle()
+                    engine.wake()
+            except Exception as exc:
+                if cmd == "start_sync":
+                    engine.sync_active = False
+                    engine.recognition_paused = False
+                    engine.clear_audio_buffer()
+                    engine.wake()
+                elif cmd == "set_test":
+                    engine.test_active = False
+                    engine.wake()
+                emit_log("ERROR", f"處理指令 {cmd} 失敗：{exc}")
 
         loop.call_soon_threadsafe(handle)
 
