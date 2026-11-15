@@ -197,7 +197,7 @@ function createPythonEnvManager({ dataDir, reqFile, pushLog, runCommand, platfor
     pushLog('INFO', `正在透過 uv 下載並建立免安裝 Python ${MANAGED_PYTHON_VERSION} 隔離環境...`);
     await runCommand(
       uvBin,
-      ['venv', venvDir, '--python', MANAGED_PYTHON_VERSION, '--managed-python'],
+      ['venv', venvDir, '--python', MANAGED_PYTHON_VERSION],
       (line) => pushLog('INFO', line),
       getUvEnv()
     );
