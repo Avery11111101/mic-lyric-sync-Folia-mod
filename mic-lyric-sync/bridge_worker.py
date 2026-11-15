@@ -53,21 +53,71 @@ def emit_log(level: str, text: str) -> None:
     emit({"type": "log", "level": level, "text": text})
 
 
-def list_input_devices() -> list[dict]:
-    devices = sd.query_devices()
-    hostapis = sd.query_hostapis()
-    default_in = sd.default.device[0]
+def _resolve_default_input_index(hostapis: list[dict] | tuple[dict, ...]) -> int | None:
+    """安全取得系統預設麥克風裝置索引。"""
+    try:
+        default_dev = getattr(sd.default, "device", None)
+        if isinstance(default_dev, (list, tuple)) and len(default_dev) >= 1:
+            candidate = default_dev[0]
+        else:
+            candidate = default_dev
+        if candidate is not None and not isinstance(candidate, bool):
+            idx = int(candidate)
+            if idx >= 0:
+                return idx
+    except (TypeError, ValueError):
+        pass
+
+    for api in hostapis:
+        try:
+            idx = int(api.get("default_input_device", -1))
+            if idx >= 0:
+                return idx
+        except (TypeError, ValueError, AttributeError):
+            continue
+    return None
+
+
+def list_input_devices(refresh: bool = False) -> list[dict]:
+    """列舉目前可用的麥克風輸入裝置清單。"""
+    if refresh:
+        try:
+            if hasattr(sd, "_terminate") and hasattr(sd, "_initialize"):
+                sd._terminate()
+                sd._initialize()
+        except Exception:
+            pass
+
+    try:
+        devices = sd.query_devices()
+        hostapis = list(sd.query_hostapis() or [])
+    except Exception as exc:
+        emit_log("ERROR", f"掃描麥克風裝置失敗：{exc}")
+        return []
+
+    default_in = _resolve_default_input_index(hostapis)
     result = []
     for idx, dev in enumerate(devices):
-        if dev["max_input_channels"] > 0:
-            api_name = hostapis[dev["hostapi"]]["name"]
+        try:
+            if int(dev.get("max_input_channels", 0) or 0) <= 0:
+                continue
+            raw_name = str(dev.get("name") or f"Device {idx}").strip()
+            hostapi_idx = dev.get("hostapi")
+            api_name = ""
+            if isinstance(hostapi_idx, int) and 0 <= hostapi_idx < len(hostapis):
+                api_name = str(hostapis[hostapi_idx].get("name") or "").strip()
+            display_name = f"{raw_name} ({api_name})" if api_name else raw_name
             result.append(
                 {
                     "id": idx,
-                    "name": f"{dev['name']} ({api_name})",
-                    "is_default": idx == default_in,
+                    "raw_name": raw_name,
+                    "hostapi": api_name,
+                    "name": display_name,
+                    "is_default": default_in is not None and idx == default_in,
                 }
             )
+        except Exception:
+            continue
     return result
 
 
@@ -335,7 +385,8 @@ def stdin_reader(loop: asyncio.AbstractEventLoop, engine: WorkerEngine) -> None:
         def handle(m=msg):
             cmd = m.get("cmd")
             if cmd == "list_mics":
-                emit({"type": "mics", "current_device_id": engine.device_id, "devices": list_input_devices()})
+                devices = list_input_devices(refresh=(engine.stream is None))
+                emit({"type": "mics", "current_device_id": engine.device_id, "devices": devices})
             elif cmd == "select_mic":
                 engine.select_mic(m.get("device_id"))
             elif cmd == "set_test":

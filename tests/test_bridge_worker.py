@@ -93,6 +93,57 @@ class TestBridgeWorker(unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_list_input_devices_and_refresh(self):
+        calls = []
+        fake_devices = [
+            {"name": "Speakers (Realtek)", "max_input_channels": 0, "hostapi": 0},
+            {"name": "麥克風 (Realtek(R) Audio)", "max_input_channels": 2, "hostapi": 0},
+            {"name": "USB Condenser Mic", "max_input_channels": 1, "hostapi": 1},
+        ]
+        fake_hostapis = [
+            {"name": "MME", "default_input_device": 1},
+            {"name": "Windows WASAPI", "default_input_device": 2},
+        ]
+
+        with (
+            patch.object(bw.sd, "query_devices", return_value=fake_devices),
+            patch.object(bw.sd, "query_hostapis", return_value=fake_hostapis),
+            patch.object(bw.sd, "default", types.SimpleNamespace(device=(1, 0))),
+            patch.object(bw.sd, "_terminate", lambda: calls.append("term"), create=True),
+            patch.object(bw.sd, "_initialize", lambda: calls.append("init"), create=True),
+        ):
+            res = bw.list_input_devices(refresh=True)
+
+        self.assertEqual(calls, ["term", "init"])
+        self.assertEqual(len(res), 2)
+        self.assertEqual(res[0]["id"], 1)
+        self.assertEqual(res[0]["raw_name"], "麥克風 (Realtek(R) Audio)")
+        self.assertEqual(res[0]["name"], "麥克風 (Realtek(R) Audio) (MME)")
+        self.assertTrue(res[0]["is_default"])
+        self.assertEqual(res[1]["id"], 2)
+        self.assertFalse(res[1]["is_default"])
+
+    def test_list_input_devices_handles_invalid_default_and_query_error(self):
+        fake_devices = [{"name": "Line In", "max_input_channels": 2, "hostapi": 0}]
+        fake_hostapis = [{"name": "MME", "default_input_device": 0}]
+
+        with (
+            patch.object(bw.sd, "query_devices", return_value=fake_devices),
+            patch.object(bw.sd, "query_hostapis", return_value=fake_hostapis),
+            patch.object(bw.sd, "default", types.SimpleNamespace(device=None)),
+        ):
+            res = bw.list_input_devices(refresh=False)
+        self.assertEqual(len(res), 1)
+        self.assertTrue(res[0]["is_default"])
+
+        with (
+            patch.object(bw.sd, "query_devices", side_effect=RuntimeError("PortAudio error")),
+            patch.object(bw, "emit_log") as mock_log,
+        ):
+            res_err = bw.list_input_devices(refresh=False)
+        self.assertEqual(res_err, [])
+        mock_log.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()
