@@ -22,8 +22,8 @@
 
 ## 🚀 安裝步驟
 
-1. 取得 `mic-lyric-sync` 模組資料夾（或解壓縮 `mic-lyric-sync-mod.zip`）。
-2. 將整個 `mic-lyric-sync` 資料夾複製到 Folia 的模組目錄中：
+1. 前往 [Releases](../../releases) 下載最新版本的 `mic-lyric-sync-mod.zip`（或取得 `mic-lyric-sync` 模組資料夾）。
+2. 在 Folia 中直接匯入 `mic-lyric-sync-mod.zip`，或將解壓縮後的整個 `mic-lyric-sync` 資料夾複製到 Folia 的模組目錄中：
    - **Windows 預設路徑**：`%APPDATA%\Folia\mods\mic-lyric-sync\`
    - 確認資料夾內包含 `mod.json`、`index.cjs`、`client.mjs`、`bridge_worker.py` 與 `requirements.txt`。
 3. 重新啟動 Folia，並在設定／模組管理中確認已啟用 **「麥克風即時聽歌同步歌詞」**。
@@ -60,6 +60,7 @@
 ## 📝 更新日誌 (Changelog)
 
 ### v0.1
+- 新增 GitHub Actions 自動封裝 `mic-lyric-sync-mod.zip` 與 Release 預發佈流程。
 - 新增自動建立模組專屬隔離 Python 虛擬環境（`venv`）與每 7 天自動檢查更新套件機制。
 - 新增設定面板內的麥克風裝置選單、即時音量測試條、即時辨識日誌框與手動更新套件按鈕。
 - 優化時間軸同步演算法：加入硬體緩衝延遲補償、高偏差匹配過濾、5 輪中位數平滑與切歌後複查機制。

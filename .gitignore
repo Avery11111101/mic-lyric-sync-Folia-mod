@@ -1,0 +1,5 @@
+README.ai.md
+README.AI.md
+*.zip
+__pycache__/
+*.pyc
