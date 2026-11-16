@@ -96,7 +96,7 @@ test('activate 預設 30 秒間隔、播畢前暫停、播畢或關閉選項後�
 
   cleanup = activate(folium);
   assert.equal(currentSettings.pollIntervalSec, 30);
-  assert.equal(currentSettings.pauseUntilSongEnd, true);
+  assert.equal(currentSettings.pauseUntilSongEnd, false);
 
   // 開啟辨識時，先檢查環境狀態，再帶入預設 30 秒間隔啟動
   await toggleCommand.run();
@@ -108,8 +108,15 @@ test('activate 預設 30 秒間隔、播畢前暫停、播畢或關閉選項後�
     customPythonPath: ''
   }]);
 
-  // 模擬辨識成功，應自動呼叫 setRecognitionPaused(true)
+  // 預設關閉「播畢前不重複辨識」，辨識成功後不應呼叫 setRecognitionPaused(true)
   stateHandler({ ok: true, title: 'Song A', artist: 'Artist A', position_sec: 12 });
+  await new Promise((r) => setTimeout(r, 220));
+  assert.ok(!rpcCalls.some(([m, a]) => m === 'setRecognitionPaused' && a === true));
+
+  // 開啟「播畢前不重複辨識」後再次辨識成功，應自動呼叫 setRecognitionPaused(true)
+  currentSettings.pauseUntilSongEnd = true;
+  settingsChangeHandler({ ...currentSettings });
+  stateHandler({ ok: true, title: 'Song B', artist: 'Artist B', position_sec: 15 });
   await new Promise((r) => setTimeout(r, 220));
   assert.ok(rpcCalls.some(([m, a]) => m === 'setRecognitionPaused' && a === true));
 

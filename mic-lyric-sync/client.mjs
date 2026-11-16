@@ -289,7 +289,7 @@ export default function activate(folium) {
         key: 'pauseUntilSongEnd',
         type: 'boolean',
         label: getLocaleMap('setting.pauseUntilSongEnd'),
-        defaultValue: true
+        defaultValue: false
       },
       {
         key: 'driftThresholdSec',
@@ -477,7 +477,7 @@ export default function activate(folium) {
       folium.ui.navigate('player');
     }
 
-    if (cfg.pauseUntilSongEnd !== false) {
+    if (Boolean(cfg.pauseUntilSongEnd)) {
       recognitionPaused = true;
       startSongEndWatcher(song);
       try {
@@ -505,7 +505,7 @@ export default function activate(folium) {
       pythonMode: nextCfg?.pythonMode || 'auto',
       customPythonPath: nextCfg?.customPythonPath || ''
     }).catch(() => {});
-    if (syncEnabled && recognitionPaused && nextCfg?.pauseUntilSongEnd === false) {
+    if (syncEnabled && recognitionPaused && !nextCfg?.pauseUntilSongEnd) {
       void resumeRecognitionFromPause('log.resumeOptionDisabled');
     }
     notifyButtons();
@@ -1129,7 +1129,7 @@ function mountSettingsPanel(container, panelCtx, folium) {
     pyCustomWrap.style.display = pyMode === 'custom' ? 'flex' : 'none';
     micSelect.value = v.micDeviceId || '';
     pollIntervalField.input.value = String(clampPollInterval(v.pollIntervalSec));
-    pauseUntilEndField.input.checked = v.pauseUntilSongEnd !== false;
+    pauseUntilEndField.input.checked = Boolean(v.pauseUntilSongEnd);
     driftField.input.value = String(v.driftThresholdSec ?? 5);
     offsetField.input.value = String(v.offsetAdjustSec ?? 0);
     providerField.input.value = v.preferredProvider || '';

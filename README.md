@@ -50,7 +50,7 @@
 | --- | --- | --- |
 | `micDeviceId` | 指定麥克風輸入裝置 ID（留空則使用系統預設） | `""` |
 | `pollIntervalSec` | 辨識間隔秒數（範圍 `5`～`300`，建議 `30` 秒） | `30` |
-| `pauseUntilSongEnd` | 播放完畢前不重複辨識（等目前歌曲播完再繼續） | `true` |
+| `pauseUntilSongEnd` | 播放完畢前不重複辨識（等目前歌曲播完再繼續） | `false` |
 | `driftThresholdSec` | 自動校正時間軸的誤差門檻（秒，範圍 `0.5`～`15`） | `5` |
 | `offsetAdjustSec` | 固定手動時間軸偏移微調（秒，範圍 `-5`～`5`） | `0` |
 | `autoMute` | 同步歌詞時自動將 Folia 播放器靜音 | `true` |
