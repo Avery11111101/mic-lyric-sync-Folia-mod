@@ -239,6 +239,7 @@ test('ensureInstallConsent 在未授權時會顯示下載項目與存放路徑�
   assert.equal(await ensureInstallConsent(folium, 'zh-TW'), false);
   assert.match(promptText, /uv \(v0\.12\.4\)/);
   assert.match(promptText, /shazamio, sounddevice, numpy/);
+  assert.match(promptText, /120–160 MB/);
   assert.match(promptText, /C:\\Folia\\mods-data\\mic-lyric-sync/);
   assert.deepEqual(rpcCalls, ['getEnvStatus']);
 

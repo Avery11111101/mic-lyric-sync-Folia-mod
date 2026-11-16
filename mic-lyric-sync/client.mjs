@@ -25,6 +25,8 @@ export function promptInstallConsent(loc, status) {
   const downloadsTitle = t(loc, 'consent.downloadsTitle');
   const downloadUv = t(loc, 'consent.downloadUv', { uvVersion, pyVersion });
   const downloadPkgs = t(loc, 'consent.downloadPkgs', { packages });
+  const sizeTitle = t(loc, 'consent.sizeTitle');
+  const sizeDesc = t(loc, 'consent.sizeDesc');
   const storageTitle = t(loc, 'consent.storageTitle');
   const storageDesc = t(loc, 'consent.storageDesc', { dataDir });
 
@@ -77,6 +79,14 @@ export function promptInstallConsent(loc, status) {
       const listDl = globalThis.document.createElement('div');
       listDl.style.cssText = 'white-space:pre-line;opacity:0.9;font-size:12px;';
       listDl.textContent = `${downloadUv}\n${downloadPkgs}`;
+
+      const secSize = globalThis.document.createElement('div');
+      secSize.style.cssText = 'font-weight:600;margin-top:2px;';
+      secSize.textContent = sizeTitle;
+
+      const pSize = globalThis.document.createElement('div');
+      pSize.style.cssText = 'opacity:0.9;font-size:12px;';
+      pSize.textContent = sizeDesc;
 
       const secStore = globalThis.document.createElement('div');
       secStore.style.cssText = 'font-weight:600;margin-top:2px;';
@@ -131,14 +141,14 @@ export function promptInstallConsent(loc, status) {
       agreeBtn.addEventListener('click', () => cleanup(true));
 
       btnRow.append(cancelBtn, agreeBtn);
-      card.append(h3, pIntro, secDl, listDl, secStore, pStore, btnRow);
+      card.append(h3, pIntro, secDl, listDl, secSize, pSize, secStore, pStore, btnRow);
       overlay.appendChild(card);
       globalThis.document.body.appendChild(overlay);
     });
   }
 
   if (typeof globalThis.confirm === 'function') {
-    const msg = `${titleText}\n\n${introText}\n\n${downloadsTitle}\n${downloadUv}\n${downloadPkgs}\n\n${storageTitle}\n${storageDesc}`;
+    const msg = `${titleText}\n\n${introText}\n\n${downloadsTitle}\n${downloadUv}\n${downloadPkgs}\n\n${sizeTitle}\n${sizeDesc}\n\n${storageTitle}\n${storageDesc}`;
     return Promise.resolve(Boolean(globalThis.confirm(msg)));
   }
 
