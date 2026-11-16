@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import activate, { clampPollInterval, getSongKey, shouldResumeAfterSongEnd } from '../mic-lyric-sync/client.mjs';
+import activate, { clampPollInterval, ensureInstallConsent, getSongKey, shouldResumeAfterSongEnd } from '../mic-lyric-sync/client.mjs';
 
 test('clampPollInterval 驗證預設值與邊界限制', () => {
   assert.equal(clampPollInterval(undefined), 30);
@@ -98,9 +98,10 @@ test('activate 預設 30 秒間隔、播畢前暫停、播畢或關閉選項後�
   assert.equal(currentSettings.pollIntervalSec, 30);
   assert.equal(currentSettings.pauseUntilSongEnd, true);
 
-  // 開啟辨識時，帶入預設 30 秒間隔
+  // 開啟辨識時，先檢查環境狀態，再帶入預設 30 秒間隔啟動
   await toggleCommand.run();
-  assert.deepEqual(rpcCalls[0], ['startSync', {
+  assert.deepEqual(rpcCalls[0], ['getEnvStatus', undefined]);
+  assert.deepEqual(rpcCalls[1], ['startSync', {
     deviceId: '',
     pollIntervalSec: 30,
     pythonMode: 'auto',
@@ -201,4 +202,47 @@ test('按下開始辨識時立即暫停播放、清空佇列並靜音，停止�
   assert.equal(loopMode, 'all');
 
   cleanup();
+});
+
+test('ensureInstallConsent 在未授權時會顯示下載項目與存放路徑，取消不授權、同意後呼叫 grantInstallConsent', async (t) => {
+  const prevConfirm = globalThis.confirm;
+  t.after(() => {
+    globalThis.confirm = prevConfirm;
+  });
+
+  const rpcCalls = [];
+  const folium = {
+    rpc: {
+      call: async (method) => {
+        rpcCalls.push(method);
+        if (method === 'getEnvStatus') {
+          return {
+            consented: false,
+            ready: false,
+            needsConsent: true,
+            dataDir: 'C:\\Folia\\mods-data\\mic-lyric-sync',
+            uvVersion: '0.12.4',
+            managedPythonVersion: '3.12',
+            packages: ['shazamio', 'sounddevice', 'numpy']
+          };
+        }
+        return { ok: true };
+      }
+    }
+  };
+
+  let promptText = '';
+  globalThis.confirm = (msg) => {
+    promptText = msg;
+    return false;
+  };
+  assert.equal(await ensureInstallConsent(folium, 'zh-TW'), false);
+  assert.match(promptText, /uv \(v0\.12\.4\)/);
+  assert.match(promptText, /shazamio, sounddevice, numpy/);
+  assert.match(promptText, /C:\\Folia\\mods-data\\mic-lyric-sync/);
+  assert.deepEqual(rpcCalls, ['getEnvStatus']);
+
+  globalThis.confirm = () => true;
+  assert.equal(await ensureInstallConsent(folium, 'zh-TW'), true);
+  assert.deepEqual(rpcCalls, ['getEnvStatus', 'getEnvStatus', 'grantInstallConsent']);
 });

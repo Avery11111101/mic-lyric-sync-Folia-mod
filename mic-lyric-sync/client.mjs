@@ -12,6 +12,155 @@ const DEFAULT_POLL_INTERVAL_SEC = 30;
 const MIN_POLL_INTERVAL_SEC = 5;
 const MAX_POLL_INTERVAL_SEC = 300;
 
+export function promptInstallConsent(loc, status) {
+  const uvVersion = status?.uvVersion || '0.12.4';
+  const pyVersion = status?.managedPythonVersion || '3.12';
+  const packages = Array.isArray(status?.packages) && status.packages.length > 0
+    ? status.packages.join(', ')
+    : 'shazamio, sounddevice, numpy';
+  const dataDir = status?.dataDir || '(Folia mods-data/mic-lyric-sync)';
+
+  const titleText = t(loc, 'consent.title');
+  const introText = t(loc, 'consent.intro');
+  const downloadsTitle = t(loc, 'consent.downloadsTitle');
+  const downloadUv = t(loc, 'consent.downloadUv', { uvVersion, pyVersion });
+  const downloadPkgs = t(loc, 'consent.downloadPkgs', { packages });
+  const storageTitle = t(loc, 'consent.storageTitle');
+  const storageDesc = t(loc, 'consent.storageDesc', { dataDir });
+
+  if (globalThis.document?.body) {
+    return new Promise((resolve) => {
+      const dark = detectPanelDarkMode(globalThis.document.body);
+      const overlay = globalThis.document.createElement('div');
+      overlay.setAttribute('role', 'dialog');
+      overlay.setAttribute('aria-modal', 'true');
+      overlay.style.cssText = [
+        'position:fixed',
+        'inset:0',
+        'z-index:99999',
+        'display:flex',
+        'align-items:center',
+        'justify-content:center',
+        'padding:16px',
+        'background:rgba(0,0,0,0.55)'
+      ].join(';');
+
+      const card = globalThis.document.createElement('div');
+      card.style.cssText = [
+        'max-width:480px',
+        'width:100%',
+        'border-radius:12px',
+        'padding:18px 20px',
+        'display:flex',
+        'flex-direction:column',
+        'gap:10px',
+        'font-family:var(--folium-font, system-ui, sans-serif)',
+        'font-size:13px',
+        'line-height:1.5',
+        `background:${dark ? '#1e2025' : '#ffffff'}`,
+        `color:${dark ? '#f4f4f5' : '#18181b'}`,
+        `border:1px solid ${dark ? 'rgba(255,255,255,0.16)' : 'rgba(0,0,0,0.14)'}`,
+        'box-shadow:0 16px 40px rgba(0,0,0,0.35)'
+      ].join(';');
+
+      const h3 = globalThis.document.createElement('div');
+      h3.style.cssText = 'font-size:15px;font-weight:600;';
+      h3.textContent = titleText;
+
+      const pIntro = globalThis.document.createElement('div');
+      pIntro.textContent = introText;
+
+      const secDl = globalThis.document.createElement('div');
+      secDl.style.cssText = 'font-weight:600;margin-top:2px;';
+      secDl.textContent = downloadsTitle;
+
+      const listDl = globalThis.document.createElement('div');
+      listDl.style.cssText = 'white-space:pre-line;opacity:0.9;font-size:12px;';
+      listDl.textContent = `${downloadUv}\n${downloadPkgs}`;
+
+      const secStore = globalThis.document.createElement('div');
+      secStore.style.cssText = 'font-weight:600;margin-top:2px;';
+      secStore.textContent = storageTitle;
+
+      const pStore = globalThis.document.createElement('div');
+      pStore.style.cssText = [
+        'white-space:pre-wrap',
+        'word-break:break-all',
+        'font-size:12px',
+        'padding:8px 10px',
+        'border-radius:8px',
+        `background:${dark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.05)'}`
+      ].join(';');
+      pStore.textContent = storageDesc;
+
+      const btnRow = globalThis.document.createElement('div');
+      btnRow.style.cssText = 'display:flex;justify-content:flex-end;gap:8px;margin-top:6px;';
+
+      const cancelBtn = globalThis.document.createElement('button');
+      cancelBtn.type = 'button';
+      cancelBtn.textContent = t(loc, 'consent.cancel');
+      cancelBtn.style.cssText = [
+        'padding:7px 14px',
+        'border-radius:8px',
+        `border:1px solid ${dark ? 'rgba(255,255,255,0.2)' : 'rgba(0,0,0,0.2)'}`,
+        'background:transparent',
+        'color:inherit',
+        'cursor:pointer',
+        'font-size:12px'
+      ].join(';');
+
+      const agreeBtn = globalThis.document.createElement('button');
+      agreeBtn.type = 'button';
+      agreeBtn.textContent = t(loc, 'consent.agree');
+      agreeBtn.style.cssText = [
+        'padding:7px 14px',
+        'border-radius:8px',
+        'border:none',
+        'background:#2563eb',
+        'color:#ffffff',
+        'cursor:pointer',
+        'font-size:12px',
+        'font-weight:600'
+      ].join(';');
+
+      const cleanup = (result) => {
+        overlay.remove();
+        resolve(result);
+      };
+      cancelBtn.addEventListener('click', () => cleanup(false));
+      agreeBtn.addEventListener('click', () => cleanup(true));
+
+      btnRow.append(cancelBtn, agreeBtn);
+      card.append(h3, pIntro, secDl, listDl, secStore, pStore, btnRow);
+      overlay.appendChild(card);
+      globalThis.document.body.appendChild(overlay);
+    });
+  }
+
+  if (typeof globalThis.confirm === 'function') {
+    const msg = `${titleText}\n\n${introText}\n\n${downloadsTitle}\n${downloadUv}\n${downloadPkgs}\n\n${storageTitle}\n${storageDesc}`;
+    return Promise.resolve(Boolean(globalThis.confirm(msg)));
+  }
+
+  return Promise.resolve(false);
+}
+
+export async function ensureInstallConsent(folium, loc) {
+  let status = null;
+  try {
+    status = await folium.rpc.call('getEnvStatus');
+  } catch {
+    return true;
+  }
+  if (!status || status.consented || status.ready || status.needsConsent === false || status.needsConsent === undefined) {
+    return true;
+  }
+  const agreed = await promptInstallConsent(loc, status);
+  if (!agreed) return false;
+  await folium.rpc.call('grantInstallConsent');
+  return true;
+}
+
 export function clampPollInterval(value) {
   if (value === null || value === undefined || value === '' || typeof value === 'boolean') {
     return DEFAULT_POLL_INTERVAL_SEC;
@@ -358,6 +507,13 @@ export default function activate(folium) {
     const loc = getLocale();
 
     if (syncEnabled) {
+      const consentOk = await ensureInstallConsent(folium, loc);
+      if (!consentOk) {
+        syncEnabled = false;
+        notifyButtons();
+        folium.ui.toast(t(loc, 'toast.consentCancelled'), { type: 'info', durationMs: 2500 });
+        return;
+      }
       stopSongEndWatcher();
       recognitionPaused = false;
       trackedSongKey = '';
@@ -533,6 +689,26 @@ function mountSettingsPanel(container, panelCtx, folium) {
 
   const getPanelLocale = () => resolveLocale(panelCtx.settings.get()?.language, folium);
 
+  let latestEnvStatus = null;
+  const consentBanner = document.createElement('div');
+  consentBanner.style.cssText = [
+    'display:none',
+    'flex-direction:column',
+    'gap:8px',
+    'padding:10px 12px',
+    'border-radius:8px',
+    'border:1px solid rgba(245, 158, 11, 0.45)',
+    'background:rgba(245, 158, 11, 0.12)',
+    'font-size:12px',
+    'line-height:1.45'
+  ].join(';');
+  const consentBannerText = document.createElement('div');
+  const consentBannerBtn = document.createElement('button');
+  consentBannerBtn.type = 'button';
+  consentBannerBtn.style.cssText = `${btnStyle};align-self:flex-start;font-weight:600;`;
+  consentBanner.append(consentBannerText, consentBannerBtn);
+  root.appendChild(consentBanner);
+
   const langWrap = document.createElement('label');
   langWrap.style.cssText = 'display:flex;flex-direction:column;gap:4px;';
   const langTitle = document.createElement('span');
@@ -701,6 +877,12 @@ function mountSettingsPanel(container, panelCtx, folium) {
   let updatingPkgs = false;
   updatePkgBtn.addEventListener('click', async () => {
     const loc = getPanelLocale();
+    const consentOk = await ensureInstallConsent(folium, loc);
+    if (!consentOk) {
+      folium.ui.toast(t(loc, 'toast.consentCancelled'), { type: 'info', durationMs: 2500 });
+      return;
+    }
+    await refreshEnvBanner(false);
     updatingPkgs = true;
     updatePkgBtn.disabled = true;
     updatePkgBtn.textContent = t(loc, 'panel.updatingPkg');
@@ -799,12 +981,55 @@ function mountSettingsPanel(container, panelCtx, folium) {
     logTitle.textContent = t(loc, 'panel.logTitle');
     updatePkgBtn.textContent = updatingPkgs ? t(loc, 'panel.updatingPkg') : t(loc, 'panel.updatePkg');
     resetBtn.textContent = t(loc, 'panel.resetDefaults');
+    consentBannerText.textContent = t(loc, 'panel.consentBanner', {
+      dataDir: latestEnvStatus?.dataDir || '(Folia mods-data/mic-lyric-sync)'
+    });
+    consentBannerBtn.textContent = t(loc, 'panel.consentBtn');
 
     renderMics(lastMicsData);
   }
 
+  async function refreshEnvBanner(autoScanIfReady = false) {
+    try {
+      const status = await folium.rpc.call('getEnvStatus');
+      latestEnvStatus = status;
+      const needsConsent = Boolean(status && status.needsConsent);
+      consentBanner.style.display = needsConsent ? 'flex' : 'none';
+      const loc = getPanelLocale();
+      consentBannerText.textContent = t(loc, 'panel.consentBanner', {
+        dataDir: status?.dataDir || '(Folia mods-data/mic-lyric-sync)'
+      });
+      if (autoScanIfReady && !needsConsent) {
+        void scanMics(false);
+      }
+    } catch {
+      consentBanner.style.display = 'none';
+      if (autoScanIfReady) {
+        void scanMics(false);
+      }
+    }
+  }
+
+  consentBannerBtn.addEventListener('click', async () => {
+    const loc = getPanelLocale();
+    const ok = await ensureInstallConsent(folium, loc);
+    if (!ok) {
+      folium.ui.toast(t(loc, 'toast.consentCancelled'), { type: 'info', durationMs: 2500 });
+      return;
+    }
+    await refreshEnvBanner(true);
+  });
+
   async function scanMics(showFeedback = false) {
     const loc = getPanelLocale();
+    if (showFeedback) {
+      const consentOk = await ensureInstallConsent(folium, loc);
+      if (!consentOk) {
+        folium.ui.toast(t(loc, 'toast.consentCancelled'), { type: 'info', durationMs: 2500 });
+        return;
+      }
+      await refreshEnvBanner(false);
+    }
     scanning = true;
     refreshBtn.disabled = true;
     refreshBtn.textContent = t(loc, 'mic.scanning');
@@ -856,8 +1081,16 @@ function mountSettingsPanel(container, panelCtx, folium) {
     void scanMics(true);
   });
 
-  testBtn.addEventListener('click', () => {
+  testBtn.addEventListener('click', async () => {
     const loc = getPanelLocale();
+    if (!testing) {
+      const consentOk = await ensureInstallConsent(folium, loc);
+      if (!consentOk) {
+        folium.ui.toast(t(loc, 'toast.consentCancelled'), { type: 'info', durationMs: 2500 });
+        return;
+      }
+      await refreshEnvBanner(false);
+    }
     testing = !testing;
     testBtn.textContent = testing ? t(loc, 'mic.testStop') : t(loc, 'mic.testStart');
     if (!testing) {
@@ -916,7 +1149,7 @@ function mountSettingsPanel(container, panelCtx, folium) {
     colorSchemeQuery.addEventListener('change', onColorSchemeChange);
   }
 
-  void scanMics(false);
+  void refreshEnvBanner(true);
   void folium.rpc.call('getLogs').then((lines) => {
     if (Array.isArray(lines)) {
       logPre.textContent = lines.join('\n');

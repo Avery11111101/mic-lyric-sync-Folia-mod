@@ -1,4 +1,5 @@
 // pythonEnv.cjs — 管理 Python 執行環境：支援系統 Python、自訂路徑、與 uv 自動下載免安裝 Python
+const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const https = require('https');
@@ -6,7 +7,40 @@ const { pipeline } = require('stream/promises');
 
 const VALID_MODES = new Set(['auto', 'system', 'custom', 'managed']);
 const MANAGED_PYTHON_VERSION = '3.12';
-const UPDATE_INTERVAL_MS = 7 * 24 * 60 * 60 * 1000;
+const UV_VERSION = '0.12.4';
+
+const UV_ASSETS = {
+  'win32-x64': {
+    archiveName: 'uv-x86_64-pc-windows-msvc.zip',
+    exeName: 'uv.exe',
+    sha256: '4f3b7d63cd81fca0da5a655d973d20affca89ce6e5f9a29fd0183cc4204a7639'
+  },
+  'win32-arm64': {
+    archiveName: 'uv-aarch64-pc-windows-msvc.zip',
+    exeName: 'uv.exe',
+    sha256: '3290abffee78c30e3113f5113e26684fd057287e89124a588dcdcdd6ceec0fea'
+  },
+  'darwin-x64': {
+    archiveName: 'uv-x86_64-apple-darwin.tar.gz',
+    exeName: 'uv',
+    sha256: 'e603f1eb634ca97a2a125539b983891f53235e901511ed10c32c08c86e253ecd'
+  },
+  'darwin-arm64': {
+    archiveName: 'uv-aarch64-apple-darwin.tar.gz',
+    exeName: 'uv',
+    sha256: '99a913b606194867b43086404412c1afe079547fee72ecfb6af7e7b0dd54b0c6'
+  },
+  'linux-x64': {
+    archiveName: 'uv-x86_64-unknown-linux-gnu.tar.gz',
+    exeName: 'uv',
+    sha256: 'c8c60f47e6f88d18dbf6f33d7279fb1fbf7ae76631768152cf5578c3d65729b4'
+  },
+  'linux-arm64': {
+    archiveName: 'uv-aarch64-unknown-linux-gnu.tar.gz',
+    exeName: 'uv',
+    sha256: '49d881b3403187e1f1789720881e77e4251ad4259d86c4844862657d2a35d13f'
+  }
+};
 
 function stripWrappingQuotes(value) {
   const s = String(value || '').trim();
@@ -23,34 +57,35 @@ function normalizePythonConfig(raw = {}) {
 }
 
 function getUvAssetInfo(platform = process.platform, arch = process.arch) {
-  if (platform === 'win32') {
-    if (arch === 'arm64') {
-      return {
-        archiveName: 'uv-aarch64-pc-windows-msvc.zip',
-        exeName: 'uv.exe',
-        url: 'https://github.com/astral-sh/uv/releases/latest/download/uv-aarch64-pc-windows-msvc.zip'
-      };
-    }
-    return {
-      archiveName: 'uv-x86_64-pc-windows-msvc.zip',
-      exeName: 'uv.exe',
-      url: 'https://github.com/astral-sh/uv/releases/latest/download/uv-x86_64-pc-windows-msvc.zip'
-    };
-  }
-  if (platform === 'darwin') {
-    const target = arch === 'arm64' ? 'aarch64-apple-darwin' : 'x86_64-apple-darwin';
-    return {
-      archiveName: `uv-${target}.tar.gz`,
-      exeName: 'uv',
-      url: `https://github.com/astral-sh/uv/releases/latest/download/uv-${target}.tar.gz`
-    };
-  }
-  const target = arch === 'arm64' ? 'aarch64-unknown-linux-gnu' : 'x86_64-unknown-linux-gnu';
+  const osKey = platform === 'win32' ? 'win32' : platform === 'darwin' ? 'darwin' : 'linux';
+  const archKey = arch === 'arm64' ? 'arm64' : 'x64';
+  const asset = UV_ASSETS[`${osKey}-${archKey}`];
   return {
-    archiveName: `uv-${target}.tar.gz`,
-    exeName: 'uv',
-    url: `https://github.com/astral-sh/uv/releases/latest/download/uv-${target}.tar.gz`
+    version: UV_VERSION,
+    archiveName: asset.archiveName,
+    exeName: asset.exeName,
+    sha256: asset.sha256,
+    url: `https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/${asset.archiveName}`
   };
+}
+
+function computeFileSha256(filePath) {
+  return new Promise((resolve, reject) => {
+    const hash = crypto.createHash('sha256');
+    const stream = fs.createReadStream(filePath);
+    stream.on('error', reject);
+    stream.on('data', (chunk) => hash.update(chunk));
+    stream.on('end', () => resolve(hash.digest('hex').toLowerCase()));
+  });
+}
+
+async function verifyFileSha256(filePath, expectedSha256) {
+  const actual = await computeFileSha256(filePath);
+  const expected = String(expectedSha256 || '').trim().toLowerCase();
+  if (!expected || actual !== expected) {
+    throw new Error(`SHA-256 校驗失敗：預期 ${expected}，實際 ${actual}`);
+  }
+  return actual;
 }
 
 function findFileRecursive(dir, targetName) {
@@ -119,10 +154,11 @@ function removeDirSafe(dirPath) {
   }
 }
 
-function createPythonEnvManager({ dataDir, reqFile, pushLog, runCommand, platform = process.platform, arch = process.arch }) {
+function createPythonEnvManager({ dataDir, reqFile, pushLog, runCommand, downloadFn = downloadFile, platform = process.platform, arch = process.arch }) {
   const configFile = path.join(dataDir, 'python_config.json');
   const metaFile = path.join(dataDir, 'python_env_meta.json');
   const stateFile = path.join(dataDir, 'pip_state.json');
+  const consentFile = path.join(dataDir, 'install_consent.json');
   const venvDir = path.join(dataDir, 'venv');
   const uvDir = path.join(dataDir, 'uv');
   const managedPythonDir = path.join(dataDir, 'python-managed');
@@ -141,6 +177,52 @@ function createPythonEnvManager({ dataDir, reqFile, pushLog, runCommand, platfor
     cachedConfig = normalizePythonConfig(raw);
     writeJsonSafe(configFile, cachedConfig);
     return getConfig();
+  }
+
+  function hasInstallConsent() {
+    const data = readJsonSafe(consentFile, null);
+    return Boolean(data && data.consented === true);
+  }
+
+  function setInstallConsent(granted) {
+    const consented = Boolean(granted);
+    writeJsonSafe(consentFile, {
+      consented,
+      updatedAt: Date.now()
+    });
+    return consented;
+  }
+
+  async function arePackagesReady() {
+    if (!fs.existsSync(venvPython)) return false;
+    try {
+      await runCommand(venvPython, ['-c', 'import shazamio, sounddevice, numpy']);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  async function getEnvStatus() {
+    const consented = hasInstallConsent();
+    const venvExists = fs.existsSync(venvPython);
+    const pkgsReady = await arePackagesReady();
+    const ready = venvExists && pkgsReady;
+    return {
+      consented,
+      venvExists,
+      pkgsReady,
+      ready,
+      needsConsent: !consented && !ready,
+      dataDir,
+      venvDir,
+      uvDir,
+      managedPythonDir,
+      uvVersion: UV_VERSION,
+      managedPythonVersion: MANAGED_PYTHON_VERSION,
+      pythonMode: cachedConfig.pythonMode,
+      packages: ['shazamio', 'sounddevice', 'numpy']
+    };
   }
 
   async function findSystemPython() {
@@ -178,12 +260,17 @@ function createPythonEnvManager({ dataDir, reqFile, pushLog, runCommand, platfor
 
     fs.mkdirSync(uvDir, { recursive: true });
     const archivePath = path.join(uvDir, info.archiveName);
-    pushLog('INFO', `正在下載免安裝 Python 管理工具 (${info.archiveName})...`);
-    await downloadFile(info.url, archivePath);
+    pushLog('INFO', `正在下載免安裝 Python 管理工具 uv v${info.version} (${info.archiveName})...`);
+    try {
+      await downloadFn(info.url, archivePath);
+      pushLog('INFO', '正在校驗工具壓縮檔 SHA-256...');
+      await verifyFileSha256(archivePath, info.sha256);
 
-    pushLog('INFO', '正在解壓縮管理工具...');
-    await runCommand('tar', ['-xf', archivePath, '-C', uvDir]);
-    try { fs.unlinkSync(archivePath); } catch {}
+      pushLog('INFO', 'SHA-256 校驗通過，正在解壓縮管理工具...');
+      await runCommand('tar', ['-xf', archivePath, '-C', uvDir]);
+    } finally {
+      try { fs.unlinkSync(archivePath); } catch {}
+    }
 
     const binPath = findFileRecursive(uvDir, info.exeName);
     if (!binPath) {
@@ -221,7 +308,7 @@ function createPythonEnvManager({ dataDir, reqFile, pushLog, runCommand, platfor
       const uvBin = await ensureUvBinary();
       await runCommand(
         uvBin,
-        ['pip', 'install', '--python', venvPython, '--upgrade', '-r', reqFile],
+        ['pip', 'install', '--python', venvPython, '--require-hashes', '-r', reqFile],
         (line) => pushLog('INFO', line),
         getUvEnv()
       );
@@ -229,7 +316,7 @@ function createPythonEnvManager({ dataDir, reqFile, pushLog, runCommand, platfor
     }
     await runCommand(
       venvPython,
-      ['-m', 'pip', 'install', '--disable-pip-version-check', '--upgrade', '-r', reqFile],
+      ['-m', 'pip', 'install', '--disable-pip-version-check', '--require-hashes', '-r', reqFile],
       (line) => pushLog('INFO', line)
     );
   }
@@ -240,12 +327,33 @@ function createPythonEnvManager({ dataDir, reqFile, pushLog, runCommand, platfor
     return true;
   }
 
-  async function ensureEnvironment(forceUpgrade = false) {
+  function assertInstallConsent() {
+    if (!hasInstallConsent()) {
+      throw new Error('INSTALL_CONSENT_REQUIRED: 尚未取得使用者安裝同意，請先確認下載內容與儲存路徑');
+    }
+  }
+
+  async function ensureEnvironment(forceReinstall = false) {
     const cfg = getConfig();
-    const prevMeta = readJsonSafe(metaFile, null);
+    let prevMeta = readJsonSafe(metaFile, null);
+    let pkgsReadyPrecheck = null;
+
+    if (!prevMeta && fs.existsSync(venvPython) && !forceReinstall) {
+      pkgsReadyPrecheck = await arePackagesReady();
+      if (pkgsReadyPrecheck) {
+        prevMeta = {
+          pythonMode: cfg.pythonMode,
+          customPythonPath: cfg.customPythonPath,
+          runtimeKind: 'existing'
+        };
+        writeJsonSafe(metaFile, prevMeta);
+      }
+    }
+
     const configChanged = !isConfigMatchingMeta(cfg, prevMeta);
 
     if (configChanged && fs.existsSync(venvDir)) {
+      assertInstallConsent();
       pushLog('INFO', `Python 環境設定已變更 (${cfg.pythonMode})，正在重建隔離環境...`);
       removeDirSafe(venvDir);
       try { fs.unlinkSync(stateFile); } catch {}
@@ -254,6 +362,7 @@ function createPythonEnvManager({ dataDir, reqFile, pushLog, runCommand, platfor
     let runtimeKind = prevMeta?.runtimeKind || null;
 
     if (!fs.existsSync(venvPython)) {
+      assertInstallConsent();
       if (cfg.pythonMode === 'custom') {
         pushLog('INFO', `正在使用自訂 Python 建立隔離環境：${cfg.customPythonPath}`);
         const [cmd, args] = await validateCustomPython(cfg.customPythonPath);
@@ -294,23 +403,15 @@ function createPythonEnvManager({ dataDir, reqFile, pushLog, runCommand, platfor
       pushLog('INFO', '隔離環境建立完成');
     }
 
-    let pkgsReady = false;
-    try {
-      await runCommand(venvPython, ['-c', 'import shazamio, sounddevice, numpy']);
-      pkgsReady = true;
-    } catch {
-      pkgsReady = false;
-    }
+    const pkgsReady = pkgsReadyPrecheck === true ? true : await arePackagesReady();
+    const needInstall = forceReinstall || !pkgsReady;
 
-    const savedState = readJsonSafe(stateFile, {});
-    const lastCheck = Number(savedState?.lastUpgradeAt || 0);
-    const needUpgrade = forceUpgrade || !pkgsReady || (Date.now() - lastCheck > UPDATE_INTERVAL_MS);
-
-    if (needUpgrade) {
-      pushLog('INFO', pkgsReady ? '正在檢查並更新 Python 套件...' : '正在自動安裝辨識所需 Python 套件 (shazamio / sounddevice / numpy)...');
+    if (needInstall) {
+      assertInstallConsent();
+      pushLog('INFO', pkgsReady ? '正在重新驗證並安裝鎖定版本 Python 套件...' : '正在安裝鎖定版本與 SHA-256 校驗的 Python 套件 (shazamio / sounddevice / numpy)...');
       await installPackages(runtimeKind);
-      writeJsonSafe(stateFile, { lastUpgradeAt: Date.now() });
-      pushLog('INFO', 'Python 套件準備與更新完成！');
+      writeJsonSafe(stateFile, { lastVerifiedAt: Date.now() });
+      pushLog('INFO', 'Python 套件準備完成！');
     }
 
     return venvPython;
@@ -319,6 +420,9 @@ function createPythonEnvManager({ dataDir, reqFile, pushLog, runCommand, platfor
   return {
     getConfig,
     setConfig,
+    hasInstallConsent,
+    setInstallConsent,
+    getEnvStatus,
     ensureEnvironment,
     findSystemPython,
     validateCustomPython
@@ -327,7 +431,10 @@ function createPythonEnvManager({ dataDir, reqFile, pushLog, runCommand, platfor
 
 module.exports = {
   MANAGED_PYTHON_VERSION,
+  UV_VERSION,
   normalizePythonConfig,
   getUvAssetInfo,
+  computeFileSha256,
+  verifyFileSha256,
   createPythonEnvManager
 };

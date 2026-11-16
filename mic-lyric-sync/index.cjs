@@ -228,6 +228,18 @@ module.exports = function activate(api) {
     return pythonEnv.getConfig();
   });
 
+  api.rpc.handle('getEnvStatus', async () => {
+    return await pythonEnv.getEnvStatus();
+  });
+
+  api.rpc.handle('grantInstallConsent', () => {
+    return { ok: true, consented: pythonEnv.setInstallConsent(true) };
+  });
+
+  api.rpc.handle('revokeInstallConsent', () => {
+    return { ok: true, consented: pythonEnv.setInstallConsent(false) };
+  });
+
   api.rpc.handle('startSync', async (opts = {}) => {
     if (opts && (opts.pythonMode !== undefined || opts.customPythonPath !== undefined)) {
       pythonEnv.setConfig({
