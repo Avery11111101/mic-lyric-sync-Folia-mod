@@ -143,6 +143,12 @@ module.exports = function activate(api) {
       }
       return;
     }
+    if (msg.type === 'transition') {
+      if (!disposed) {
+        try { api.rpc.send('transition', msg); } catch {}
+      }
+      return;
+    }
     if (msg.type === 'state') {
       latestState = {
         ok: Boolean(msg.ok),

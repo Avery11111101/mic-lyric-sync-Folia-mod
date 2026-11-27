@@ -18,7 +18,10 @@ import sounddevice as sd
 from shazamio import HTTPClient, Serialize, Shazam
 
 SAMPLE_RATE = 44100
-WINDOW_SEC = 12.0               # ShazamIO 0.9+ 建議的 12 秒最佳辨識視窗
+FAST_WINDOW_SEC = 4.0           # 快速快查視窗（4.0 秒音訊即產出指紋，大幅降低辨識等待延遲）
+FULL_WINDOW_SEC = 12.0          # 完整辨識視窗（ShazamIO 0.9+ 建議的最佳視窗）
+WINDOW_SEC = FULL_WINDOW_SEC    # 相容舊常數參照
+TRANSITION_COOLDOWN_SEC = 8.0   # 切歌間隙冷卻時間（秒）
 DEFAULT_POLL_INTERVAL_SEC = 30.0  # 預設每 30 秒辨識一次，大幅降低 429 限流風險
 MIN_POLL_INTERVAL_SEC = 5.0
 MAX_POLL_INTERVAL_SEC = 300.0
@@ -145,7 +148,7 @@ class WorkerEngine:
         self.device_id: int | None = None
         self.samplerate = SAMPLE_RATE
         self.stream_latency = 0.0
-        self.max_samples = int(self.samplerate * (WINDOW_SEC + 2))
+        self.max_samples = int(self.samplerate * (FULL_WINDOW_SEC + 2))
         self._lock = threading.Lock()
         self._chunks: deque[np.ndarray] = deque()
         self._total_samples = 0
@@ -155,9 +158,18 @@ class WorkerEngine:
         self.sync_active = False
         self.recognition_paused = False
         self.poll_interval_sec = DEFAULT_POLL_INTERVAL_SEC
+        self.fast_window_mode = True
         self.test_active = False
         self.should_quit = False
         self._wake_event: asyncio.Event | None = None
+        self.loop: asyncio.AbstractEventLoop | None = None
+
+        # 本機切歌突變／音訊過渡間隙偵測指標
+        self._short_rms = 0.0
+        self._long_rms = 0.0
+        self._dip_start_mono: float | None = None
+        self._last_transition_mono = 0.0
+        self.transition_cooldown_sec = TRANSITION_COOLDOWN_SEC
 
     def ensure_wake_event(self) -> asyncio.Event:
         if self._wake_event is None:
@@ -166,12 +178,25 @@ class WorkerEngine:
 
     def wake(self) -> None:
         if self._wake_event is not None:
-            self._wake_event.set()
+            if self.loop is not None and not self.loop.is_closed():
+                try:
+                    self.loop.call_soon_threadsafe(self._wake_event.set)
+                except RuntimeError:
+                    self._wake_event.set()
+            else:
+                self._wake_event.set()
 
     def clear_audio_buffer(self) -> None:
         with self._lock:
             self._chunks.clear()
             self._total_samples = 0
+
+    def trigger_transition(self, dip_duration: float = 0.0) -> None:
+        emit_log("INFO", f"偵測到音樂切歌過渡間隔（間隙={dip_duration:.2f}s），立即重置緩衝並啟動快速辨識...")
+        emit({"type": "transition", "gap_sec": round(dip_duration, 2)})
+        self.fast_window_mode = True
+        self.clear_audio_buffer()
+        self.wake()
 
     def set_poll_interval(self, value: object) -> float:
         self.poll_interval_sec = clamp_poll_interval(value)
@@ -187,6 +212,7 @@ class WorkerEngine:
         if target:
             emit_log("INFO", "歌曲播放中，已暫停重複辨識（將於播畢後自動繼續）")
         else:
+            self.fast_window_mode = True
             emit_log("INFO", "恢復麥克風辨識，開始收集下一首音訊...")
         self.wake()
 
@@ -196,7 +222,8 @@ class WorkerEngine:
         if n == 0:
             return
         self.latest_peak = float(np.max(np.abs(mono)))
-        self.latest_rms = float(np.sqrt(np.mean(mono * mono)))
+        rms = float(np.sqrt(np.mean(mono * mono)))
+        self.latest_rms = rms
 
         if self.sync_active and not self.recognition_paused:
             with self._lock:
@@ -205,6 +232,29 @@ class WorkerEngine:
                 while self._total_samples > self.max_samples and self._chunks:
                     dropped = self._chunks.popleft()
                     self._total_samples -= len(dropped)
+
+        if self.sync_active:
+            alpha_short = 0.25
+            alpha_long = 0.015
+            self._short_rms = (1.0 - alpha_short) * self._short_rms + alpha_short * rms
+            self._long_rms = (1.0 - alpha_long) * self._long_rms + alpha_long * rms
+
+            if self._long_rms >= 0.003:
+                dip_threshold = max(0.0012, self._long_rms * 0.30)
+                rise_threshold = max(0.0025, self._long_rms * 0.50)
+                now = time.monotonic()
+
+                if self._short_rms < dip_threshold:
+                    if self._dip_start_mono is None:
+                        self._dip_start_mono = now
+                elif self._short_rms >= rise_threshold:
+                    if self._dip_start_mono is not None:
+                        dip_duration = now - self._dip_start_mono
+                        self._dip_start_mono = None
+                        if 0.25 <= dip_duration <= 6.0:
+                            if now - self._last_transition_mono >= self.transition_cooldown_sec:
+                                self._last_transition_mono = now
+                                self.trigger_transition(dip_duration)
 
     @staticmethod
     def _build_stream_candidates(target_device_id: int | None) -> list[dict]:
@@ -365,14 +415,17 @@ class WorkerEngine:
         if self.sync_active or self.test_active:
             self.ensure_stream()
 
-    def snapshot_wav(self) -> tuple[bytes, float, float, float, float] | None:
+    def snapshot_wav(self, target_sec: float | None = None) -> tuple[bytes, float, float, float, float] | None:
+        if target_sec is None:
+            target_sec = FAST_WINDOW_SEC if self.fast_window_mode else FULL_WINDOW_SEC
+        min_required_sec = 3.5 if target_sec <= FAST_WINDOW_SEC else 4.5
         with self._lock:
-            if self._total_samples < int(self.samplerate * 4.5):
+            if self._total_samples < int(self.samplerate * min_required_sec):
                 return None
             merged = np.concatenate(list(self._chunks))
             snapshot_mono = time.monotonic()
 
-        needed = int(self.samplerate * WINDOW_SEC)
+        needed = int(self.samplerate * target_sec)
         samples = merged[-needed:].copy() if len(merged) > needed else merged
         duration = len(samples) / self.samplerate
 
@@ -436,7 +489,7 @@ async def recognition_loop(engine: WorkerEngine) -> None:
 
             snap = engine.snapshot_wav()
             if snap is None:
-                await interruptible_sleep(engine, 1.0)
+                await interruptible_sleep(engine, 0.4)
                 continue
 
             round_id += 1
@@ -446,7 +499,11 @@ async def recognition_loop(engine: WorkerEngine) -> None:
                 await interruptible_sleep(engine, engine.poll_interval_sec)
                 continue
 
-            emit_log("INFO", f"#{round_id} 開始辨識 | 時長={duration:.1f}s, RMS={rms:.4f}, Peak={peak_db:.1f}dBFS")
+            mode_str = "快速視窗" if engine.fast_window_mode else "完整視窗"
+            emit_log(
+                "INFO",
+                f"#{round_id} 開始辨識 [{mode_str}] | 時長={duration:.1f}s, RMS={rms:.4f}, Peak={peak_db:.1f}dBFS",
+            )
             t0 = time.perf_counter()
             try:
                 raw_out = await asyncio.wait_for(shazam.recognize(wav_bytes), timeout=RECOGNIZE_TIMEOUT)
@@ -471,6 +528,11 @@ async def recognition_loop(engine: WorkerEngine) -> None:
             matches = serialized.matches or []
 
             if not track or not matches:
+                if engine.fast_window_mode:
+                    engine.fast_window_mode = False
+                    emit_log("INFO", f"#{round_id} 快速視窗未比對到，累積音訊升級為完整視窗（{FULL_WINDOW_SEC:.0f}s）重試...")
+                    await interruptible_sleep(engine, 4.0)
+                    continue
                 emit_log("INFO", f"#{round_id} 未比對到歌曲 | 耗時={elapsed_ms:.0f}ms, retry_ms={serialized.retry_ms}")
                 await interruptible_sleep(engine, engine.poll_interval_sec)
                 continue
@@ -480,9 +542,14 @@ async def recognition_loop(engine: WorkerEngine) -> None:
             f_skew = float(best.frequency_skew or 0.0)
             if abs(t_skew) > MAX_SKEW or abs(f_skew) > MAX_SKEW:
                 emit_log("WARN", f"#{round_id} 忽略高偏差匹配 (time_skew={t_skew:.4f}, freq_skew={f_skew:.4f})")
+                if engine.fast_window_mode:
+                    engine.fast_window_mode = False
+                    await interruptible_sleep(engine, 4.0)
+                    continue
                 await interruptible_sleep(engine, engine.poll_interval_sec)
                 continue
 
+            engine.fast_window_mode = False
             offset_sec = float(best.offset or 0.0)
             live_pos = offset_sec + duration + (time.monotonic() - snapshot_mono) + engine.stream_latency
             title = track.title or ""
@@ -490,7 +557,7 @@ async def recognition_loop(engine: WorkerEngine) -> None:
 
             emit_log(
                 "INFO",
-                f"#{round_id} 辨識成功 | {title} - {artist} | 現場進度={live_pos:.2f}s | "
+                f"#{round_id} 辨識成功 [{mode_str}] | {title} - {artist} | 現場進度={live_pos:.2f}s | "
                 f"耗時={elapsed_ms:.0f}ms, skew=({t_skew:.4f}, {f_skew:.4f})",
             )
             emit(
@@ -536,6 +603,7 @@ def stdin_reader(loop: asyncio.AbstractEventLoop, engine: WorkerEngine) -> None:
                         engine.poll_interval_sec = clamp_poll_interval(m.get("poll_interval_sec"))
                     engine.sync_active = True
                     engine.recognition_paused = False
+                    engine.fast_window_mode = True
                     engine.clear_audio_buffer()
                     engine.ensure_stream()
                     engine.wake()
@@ -579,6 +647,7 @@ async def main() -> None:
     engine = WorkerEngine()
     engine.ensure_wake_event()
     loop = asyncio.get_running_loop()
+    engine.loop = loop
     emit({"type": "mics", "current_device_id": engine.device_id, "devices": list_input_devices()})
     threading.Thread(target=stdin_reader, args=(loop, engine), daemon=True).start()
     await asyncio.gather(recognition_loop(engine), level_loop(engine))

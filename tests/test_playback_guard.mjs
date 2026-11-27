@@ -54,7 +54,7 @@ test('createPlaybackGuard 辨識時停止自動下一首，關閉時恢復 loopM
   };
 
   const guard = createPlaybackGuard(folium);
-  guard.captureAndApplyOnStart();
+  await guard.captureAndApplyOnStart(false);
   assert.equal(loopMode, 'off');
 
   await guard.applyBeforePlay(true);
@@ -87,7 +87,7 @@ test('createPlaybackGuard 未開啟 autoMute 時不主動覆寫音量與靜音',
     }
   });
 
-  guard.captureAndApplyOnStart();
+  await guard.captureAndApplyOnStart(false);
   assert.equal(loopMode, 'off');
   await guard.applyBeforePlay(false);
   await guard.restoreOnStop();

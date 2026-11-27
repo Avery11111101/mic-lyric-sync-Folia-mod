@@ -34,6 +34,7 @@ test('activate 預設 30 秒間隔、播畢前暫停、播畢或關閉選項後�
   });
   let registeredSection = null;
   let stateHandler = null;
+  let transitionHandler = null;
   let settingsChangeHandler = null;
   let toggleCommand = null;
   const rpcCalls = [];
@@ -62,6 +63,7 @@ test('activate 預設 30 秒間隔、播畢前暫停、播畢或關閉選項後�
     rpc: {
       on: (evt, fn) => {
         if (evt === 'state') stateHandler = fn;
+        if (evt === 'transition') transitionHandler = fn;
         return () => {};
       },
       call: async (method, arg) => {
@@ -123,6 +125,17 @@ test('activate 預設 30 秒間隔、播畢前暫停、播畢或關閉選項後�
   // 模擬使用者在設定中關閉「播畢前不重複辨識」，應立即恢復辨識
   currentSettings.pauseUntilSongEnd = false;
   settingsChangeHandler({ ...currentSettings });
+  await new Promise((r) => setTimeout(r, 20));
+  assert.ok(rpcCalls.some(([m, a]) => m === 'setRecognitionPaused' && a === false));
+
+  // 測試：當再次處於播畢前暫停時，收到 transition 事件應立即恢復辨識
+  currentSettings.pauseUntilSongEnd = true;
+  settingsChangeHandler({ ...currentSettings });
+  stateHandler({ ok: true, title: 'Song C', artist: 'Artist C', position_sec: 20 });
+  await new Promise((r) => setTimeout(r, 220));
+  rpcCalls.length = 0;
+  assert.ok(typeof transitionHandler === 'function');
+  transitionHandler({ gap_sec: 0.5 });
   await new Promise((r) => setTimeout(r, 20));
   assert.ok(rpcCalls.some(([m, a]) => m === 'setRecognitionPaused' && a === false));
 

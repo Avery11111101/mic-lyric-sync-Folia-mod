@@ -218,6 +218,96 @@ class TestBridgeWorker(unittest.TestCase):
         mock_refresh.assert_called_once()
         self.assertGreater(len(closed_streams), 0)
 
+    def test_fast_and_full_window_snapshot(self):
+        self.assertEqual(bw.FAST_WINDOW_SEC, 4.0)
+        self.assertEqual(bw.FULL_WINDOW_SEC, 12.0)
+        engine = bw.WorkerEngine()
+        engine.sync_active = True
+        self.assertTrue(engine.fast_window_mode)
+
+        # 3.0 秒音訊：快速視窗（需 3.5s+）應回傳 None
+        samples_3s = np.ones((int(engine.samplerate * 3.0), 1), dtype=np.float32) * 0.1
+        engine._audio_callback(samples_3s, len(samples_3s), None, None)
+        self.assertIsNone(engine.snapshot_wav())
+
+        # 補到 4.0 秒音訊：快速視窗應成功回傳且 duration 為 4.0 秒
+        samples_1s = np.ones((int(engine.samplerate * 1.0), 1), dtype=np.float32) * 0.1
+        engine._audio_callback(samples_1s, len(samples_1s), None, None)
+        snap_fast = engine.snapshot_wav()
+        self.assertIsNotNone(snap_fast)
+        self.assertAlmostEqual(snap_fast[1], 4.0, delta=0.05)
+
+        # 切換為完整視窗（需 4.5s+）：目前 4.0s 應回傳 None
+        engine.fast_window_mode = False
+        self.assertIsNone(engine.snapshot_wav())
+
+        # 補滿至 12 秒音訊：完整視窗應回傳 12.0 秒
+        samples_8s = np.ones((int(engine.samplerate * 8.0), 1), dtype=np.float32) * 0.1
+        engine._audio_callback(samples_8s, len(samples_8s), None, None)
+        snap_full = engine.snapshot_wav()
+        self.assertIsNotNone(snap_full)
+        self.assertAlmostEqual(snap_full[1], 12.0, delta=0.05)
+
+    def test_trigger_transition_resets_buffer_and_sets_fast_mode(self):
+        engine = bw.WorkerEngine()
+        engine.ensure_wake_event()
+        engine.fast_window_mode = False
+        samples = np.ones((2048, 1), dtype=np.float32) * 0.1
+        engine.sync_active = True
+        engine._audio_callback(samples, 2048, None, None)
+        self.assertEqual(engine._total_samples, 2048)
+
+        emitted = []
+        with patch.object(bw, "emit", side_effect=lambda obj: emitted.append(obj)), patch.object(bw, "emit_log"):
+            engine.trigger_transition(dip_duration=0.6)
+
+        self.assertTrue(engine.fast_window_mode)
+        self.assertEqual(engine._total_samples, 0)
+        self.assertEqual(len(engine._chunks), 0)
+        self.assertEqual(len(emitted), 1)
+        self.assertEqual(emitted[0]["type"], "transition")
+        self.assertEqual(emitted[0]["gap_sec"], 0.6)
+        self.assertTrue(engine.ensure_wake_event().is_set())
+
+    def test_audio_callback_detects_gap_transition(self):
+        engine = bw.WorkerEngine()
+        engine.sync_active = True
+        engine.ensure_wake_event()
+
+        clock = [100.0]
+
+        def fake_mono():
+            return clock[0]
+
+        loud = np.ones((1024, 1), dtype=np.float32) * 0.08
+        quiet = np.ones((1024, 1), dtype=np.float32) * 0.0001
+
+        with patch.object(bw.time, "monotonic", side_effect=fake_mono):
+            # 建立穩定的 long_rms
+            for _ in range(80):
+                clock[0] += 0.03
+                engine._audio_callback(loud, 1024, None, None)
+
+            self.assertGreater(engine._long_rms, 0.01)
+
+            # 音訊中斷（靜音/掉落 0.5 秒）
+            for _ in range(15):
+                clock[0] += 0.035
+                engine._audio_callback(quiet, 1024, None, None)
+
+            self.assertIsNotNone(engine._dip_start_mono)
+
+            # 音樂重新響起（切歌開頭）
+            emitted = []
+            with patch.object(bw, "emit", side_effect=lambda obj: emitted.append(obj)), patch.object(bw, "emit_log"):
+                for _ in range(3):
+                    clock[0] += 0.03
+                    engine._audio_callback(loud, 1024, None, None)
+
+            self.assertEqual(len(emitted), 1)
+            self.assertEqual(emitted[0]["type"], "transition")
+            self.assertTrue(engine.fast_window_mode)
+
 
 if __name__ == "__main__":
     unittest.main()

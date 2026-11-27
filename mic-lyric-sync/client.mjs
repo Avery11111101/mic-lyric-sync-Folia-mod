@@ -498,6 +498,12 @@ export default function activate(folium) {
     void handleRecognizedState(payload);
   });
 
+  const offTransition = folium.rpc.on('transition', () => {
+    if (syncEnabled && recognitionPaused) {
+      void resumeRecognitionFromPause('log.resumeAfterTransition');
+    }
+  });
+
   const offSettingsWatch = settingsSection.settings.onChange((nextCfg) => {
     const intervalSec = clampPollInterval(nextCfg?.pollIntervalSec);
     void folium.rpc.call('setPollInterval', intervalSec).catch(() => {});
@@ -640,6 +646,7 @@ export default function activate(folium) {
     trackedSongKey = '';
     stopSongEndWatcher();
     if (typeof offState === 'function') offState();
+    if (typeof offTransition === 'function') offTransition();
     if (typeof offSettingsWatch === 'function') offSettingsWatch();
     void folium.rpc.call('stopSync').catch(() => {});
     void playbackGuard.restoreOnStop();
